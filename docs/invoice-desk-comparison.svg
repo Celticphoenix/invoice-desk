@@ -70,12 +70,12 @@
   <text x="972" y="485" text-anchor="middle" class="yes">✓</text>
   <text x="972" y="511" text-anchor="middle" class="cell">Gmail send-only</text>
 
-  <text x="69" y="575" class="feature">Email selected clients</text>
-  <text x="420" y="575" text-anchor="middle" class="no">Via integration*</text>
-  <text x="606" y="575" text-anchor="middle" class="no">Via integration*</text>
-  <text x="782" y="575" text-anchor="middle" class="no">Via integration*</text>
+  <text x="69" y="575" class="feature">Email marketing campaigns</text>
+  <text x="420" y="575" text-anchor="middle" class="no">Via integration†</text>
+  <text x="606" y="575" text-anchor="middle" class="no">Via integration†</text>
+  <text x="782" y="575" text-anchor="middle" class="no">Via integration†</text>
   <text x="972" y="563" text-anchor="middle" class="yes">✓</text>
-  <text x="972" y="589" text-anchor="middle" class="cell">Included</text>
+  <text x="972" y="589" text-anchor="middle" class="cell">Unlimited campaigns*</text>
 
   <text x="69" y="653" class="feature">Online card payments</text>
   <text x="420" y="653" text-anchor="middle" class="yes">✓</text>
@@ -117,7 +117,8 @@
   <rect x="60" y="1025" width="1080" height="72" rx="16" fill="#102f27"/>
   <text x="90" y="1056" class="ours" style="font-size:19px;font-weight:800">Invoice Desk is focused invoicing—not full accounting software.</text>
   <text x="90" y="1082" class="ours" style="font-size:17px">github.com/Celticphoenix/invoice-desk</text>
-  <text x="60" y="1125" class="small" style="font-size:13px">*FreshBooks supports marketing workflows through integrations such as HubSpot; this is not shown as a native plan feature.</text>
-  <text x="60" y="1150" class="small" style="font-size:13px">Regular FreshBooks monthly prices and plan details checked Sept. 14, 2026; promotions may change.</text>
-  <text x="60" y="1175" class="small" style="font-size:13px">FreshBooks is a trademark of its owner. Invoice Desk is independent and not affiliated with FreshBooks.</text>
+  <text x="60" y="1115" class="small" style="font-size:12px">*Up to 50 eligible recipients per send; Gmail sending limits apply.</text>
+  <text x="60" y="1136" class="small" style="font-size:12px">†FreshBooks supports marketing workflows through integrations such as HubSpot; not shown as a native plan feature.</text>
+  <text x="60" y="1157" class="small" style="font-size:12px">Regular FreshBooks monthly prices and plan details checked Sept. 14, 2026; promotions may change.</text>
+  <text x="60" y="1178" class="small" style="font-size:12px">FreshBooks is a trademark of its owner. Invoice Desk is independent and not affiliated with FreshBooks.</text>
 </svg>
