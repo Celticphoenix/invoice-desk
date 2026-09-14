@@ -1,0 +1,34 @@
+{
+  "name": "invoice-desk",
+  "version": "1.0.0",
+  "description": "A tiny, self-hosted invoicing app for small teams.",
+  "private": true,
+  "license": "MIT",
+  "homepage": "https://github.com/Celticphoenix/invoice-desk#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Celticphoenix/invoice-desk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Celticphoenix/invoice-desk/issues"
+  },
+  "keywords": [
+    "invoice",
+    "invoicing",
+    "self-hosted",
+    "sqlite",
+    "stripe"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test",
+    "backup": "node scripts/backup.mjs backup",
+    "restore": "node scripts/backup.mjs restore",
+    "backup:smoke": "node scripts/backup.mjs smoke"
+  }
+}

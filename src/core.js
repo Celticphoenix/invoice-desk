@@ -1,0 +1,1316 @@
+import { randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+
+let cached;
+
+function now() {
+  return new Date().toISOString();
+}
+
+export function dataRoot() {
+  return process.env.INVOICE_DESK_DATA_ROOT
+    ? path.resolve(process.env.INVOICE_DESK_DATA_ROOT)
+    : path.resolve("data");
+}
+
+function database() {
+  const file = path.join(dataRoot(), "invoice-desk.sqlite");
+  if (cached?.file === file) return cached.db;
+  cached?.db.close();
+  mkdirSync(dataRoot(), { recursive: true });
+  const db = new DatabaseSync(file);
+  db.exec(
+    "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+  );
+  migrate(db);
+  cached = { file, db };
+  return db;
+}
+
+function migrate(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS business_settings(
+      id INTEGER PRIMARY KEY CHECK(id=1), name TEXT NOT NULL, email TEXT NOT NULL,
+      address TEXT NOT NULL, gst_number TEXT NOT NULL DEFAULT '', qst_number TEXT NOT NULL DEFAULT '',
+      logo_url TEXT NOT NULL, accountant_email TEXT NOT NULL,
+      payment_instructions TEXT NOT NULL, paypal_fallback_url TEXT NOT NULL,
+      invoice_prefix TEXT NOT NULL, next_invoice_number INTEGER NOT NULL CHECK(next_invoice_number > 0)
+    );
+    CREATE TABLE IF NOT EXISTS clients(
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, company TEXT NOT NULL,
+      address TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS invoices(
+      id TEXT PRIMARY KEY, invoice_number TEXT UNIQUE, client_id TEXT NOT NULL REFERENCES clients(id),
+      state TEXT NOT NULL CHECK(state IN ('draft','issued','void')),
+      currency TEXT NOT NULL CHECK(currency IN ('CAD','USD')), issue_date TEXT NOT NULL, due_date TEXT NOT NULL,
+      terms TEXT NOT NULL, notes TEXT NOT NULL, lines_json TEXT NOT NULL, taxes_json TEXT NOT NULL,
+      subtotal_minor INTEGER NOT NULL, tax_minor INTEGER NOT NULL, total_minor INTEGER NOT NULL,
+      snapshot_json TEXT, pdf_filename TEXT, void_reason TEXT,
+      replaces_invoice_id TEXT REFERENCES invoices(id), replaced_by_invoice_id TEXT REFERENCES invoices(id),
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL, issued_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS payments(
+      id TEXT PRIMARY KEY, invoice_id TEXT NOT NULL REFERENCES invoices(id), payment_date TEXT NOT NULL,
+      method TEXT NOT NULL CHECK(method IN ('paypal','bank_transfer','stripe','other')),
+      currency TEXT NOT NULL CHECK(currency IN ('CAD','USD')),
+      amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), reference TEXT NOT NULL, notes TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('active','corrected')),
+      correction_of_id TEXT REFERENCES payments(id), created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS audit_events(
+      id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+      action TEXT NOT NULL, details_json TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS stripe_sessions(
+      id TEXT PRIMARY KEY, invoice_id TEXT NOT NULL REFERENCES invoices(id),
+      amount_minor INTEGER NOT NULL CHECK(amount_minor > 0),
+      currency TEXT NOT NULL CHECK(currency IN ('CAD','USD')), url TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('open','paid','expired')),
+      livemode INTEGER NOT NULL CHECK(livemode IN (0,1)), created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS stripe_events(
+      id TEXT PRIMARY KEY, event_type TEXT NOT NULL, processed_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS invoice_client_idx ON invoices(client_id);
+    CREATE INDEX IF NOT EXISTS payment_invoice_idx ON payments(invoice_id);
+    CREATE INDEX IF NOT EXISTS stripe_invoice_idx ON stripe_sessions(invoice_id);
+  `);
+  db.prepare("INSERT OR IGNORE INTO schema_migrations VALUES (1, ?)").run(
+    now(),
+  );
+  db.prepare(
+    "INSERT OR IGNORE INTO business_settings(id,name,email,address,logo_url,accountant_email,payment_instructions,paypal_fallback_url,invoice_prefix,next_invoice_number) VALUES (1,?,?,?,?,?,?,?,?,?)",
+  ).run(
+    "Your Management Agency",
+    "billing@youragency.com",
+    "Add your business address in Settings",
+    "",
+    "",
+    "Payment instructions are provided separately.",
+    "",
+    "INV-",
+    1001,
+  );
+  if (
+    !db.prepare("SELECT version FROM schema_migrations WHERE version=2").get()
+  ) {
+    const drafts = db
+      .prepare(
+        "SELECT id, lines_json, taxes_json FROM invoices WHERE state='draft'",
+      )
+      .all();
+    const update = db.prepare(
+      "UPDATE invoices SET taxes_json=?,subtotal_minor=?,tax_minor=?,total_minor=?,updated_at=? WHERE id=?",
+    );
+    for (const draft of drafts) {
+      let changed = false;
+      const taxes = JSON.parse(draft.taxes_json).flatMap((tax) => {
+        const oldRate = tax.rateThousandths ?? tax.rateBasisPoints * 10;
+        if (tax.label.toUpperCase() !== "HST" || oldRate !== 13000)
+          return [tax];
+        changed = true;
+        return [
+          { label: "GST", rateThousandths: 5000 },
+          { label: "QST", rateThousandths: 9975 },
+        ];
+      });
+      if (changed) {
+        const amounts = calculate(JSON.parse(draft.lines_json), taxes);
+        update.run(
+          JSON.stringify(amounts.taxes),
+          amounts.subtotalMinor,
+          amounts.taxMinor,
+          amounts.totalMinor,
+          now(),
+          draft.id,
+        );
+      }
+    }
+    db.prepare("INSERT INTO schema_migrations VALUES (2, ?)").run(now());
+  }
+  if (
+    !db.prepare("SELECT version FROM schema_migrations WHERE version=3").get()
+  ) {
+    const columns = new Set(
+      db
+        .prepare("PRAGMA table_info(business_settings)")
+        .all()
+        .map((row) => row.name),
+    );
+    if (!columns.has("gst_number"))
+      db.exec(
+        "ALTER TABLE business_settings ADD COLUMN gst_number TEXT NOT NULL DEFAULT ''",
+      );
+    if (!columns.has("qst_number"))
+      db.exec(
+        "ALTER TABLE business_settings ADD COLUMN qst_number TEXT NOT NULL DEFAULT ''",
+      );
+    const paymentsSql = db
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='payments'",
+      )
+      .get().sql;
+    if (!paymentsSql.includes("'stripe'")) {
+      db.exec(`
+        PRAGMA foreign_keys=OFF;
+        CREATE TABLE payments_v3(
+          id TEXT PRIMARY KEY, invoice_id TEXT NOT NULL REFERENCES invoices(id), payment_date TEXT NOT NULL,
+          method TEXT NOT NULL CHECK(method IN ('paypal','bank_transfer','stripe','other')),
+          currency TEXT NOT NULL CHECK(currency IN ('CAD','USD')),
+          amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), reference TEXT NOT NULL, notes TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('active','corrected')),
+          correction_of_id TEXT REFERENCES payments_v3(id), created_at TEXT NOT NULL
+        );
+        INSERT INTO payments_v3 SELECT * FROM payments;
+        DROP TABLE payments;
+        ALTER TABLE payments_v3 RENAME TO payments;
+        CREATE INDEX payment_invoice_idx ON payments(invoice_id);
+        PRAGMA foreign_keys=ON;
+      `);
+    }
+    db.prepare("INSERT INTO schema_migrations VALUES (3, ?)").run(now());
+  }
+}
+
+function problem(status, message) {
+  return Object.assign(new Error(message), { status });
+}
+
+function text(value, name, maximum = 1000, required = false) {
+  if (typeof value !== "string") throw problem(400, `${name} is required`);
+  const clean = value.trim();
+  if (required && !clean) throw problem(400, `${name} is required`);
+  if (clean.length > maximum) throw problem(400, `${name} is too long`);
+  return clean;
+}
+
+function email(value, name, required = false) {
+  const clean = text(value, name, 254, required);
+  if (clean && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean))
+    throw problem(400, `${name} is not a valid email`);
+  return clean;
+}
+
+function date(value, name) {
+  const clean = text(value, name, 10, true);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(clean))
+    throw problem(400, `${name} is invalid`);
+  return clean;
+}
+
+function integer(value, name, minimum, maximum) {
+  if (!Number.isInteger(value) || value < minimum || value > maximum)
+    throw problem(400, `${name} is invalid`);
+  return value;
+}
+
+function currency(value) {
+  if (value !== "CAD" && value !== "USD")
+    throw problem(400, "Currency must be CAD or USD");
+  return value;
+}
+
+function parseQuantity(value) {
+  const clean = text(value, "Quantity", 20, true);
+  if (!/^\d{1,7}(?:\.\d{1,4})?$/.test(clean))
+    throw problem(
+      400,
+      "Quantity must be a positive number with up to four decimals",
+    );
+  const [whole, fraction = ""] = clean.split(".");
+  return {
+    clean,
+    scaled: BigInt(whole) * 10000n + BigInt(fraction.padEnd(4, "0")),
+  };
+}
+
+function roundRatio(numerator, denominator) {
+  return Number((numerator + denominator / 2n) / denominator);
+}
+
+export function calculate(lines, taxes) {
+  if (!Array.isArray(lines) || lines.length < 1 || lines.length > 100)
+    throw problem(400, "Add at least one service");
+  const calculatedLines = lines.map((line) => {
+    const quantity = parseQuantity(line.quantity);
+    const rateMinor = integer(line.rateMinor, "Rate", 0, 10_000_000_000);
+    return {
+      description: text(line.description, "Service description", 500, true),
+      quantity: quantity.clean,
+      rateMinor,
+      amountMinor: roundRatio(quantity.scaled * BigInt(rateMinor), 10000n),
+    };
+  });
+  if (!Array.isArray(taxes) || taxes.length > 10)
+    throw problem(400, "Too many tax lines");
+  const subtotalMinor = calculatedLines.reduce(
+    (sum, line) => sum + line.amountMinor,
+    0,
+  );
+  const calculatedTaxes = taxes.map((tax) => {
+    const rateThousandths = integer(
+      tax.rateThousandths ?? tax.rateBasisPoints * 10,
+      "Tax rate",
+      0,
+      100000,
+    );
+    return {
+      label: text(tax.label, "Tax label", 40, true),
+      rateThousandths,
+      amountMinor: roundRatio(
+        BigInt(subtotalMinor) * BigInt(rateThousandths),
+        100000n,
+      ),
+    };
+  });
+  const taxMinor = calculatedTaxes.reduce(
+    (sum, tax) => sum + tax.amountMinor,
+    0,
+  );
+  return {
+    lines: calculatedLines,
+    taxes: calculatedTaxes,
+    subtotalMinor,
+    taxMinor,
+    totalMinor: subtotalMinor + taxMinor,
+  };
+}
+
+function settings(db = database()) {
+  const row = db.prepare("SELECT * FROM business_settings WHERE id=1").get();
+  return {
+    name: row.name,
+    email: row.email,
+    address: row.address,
+    gstNumber: row.gst_number,
+    qstNumber: row.qst_number,
+    logoUrl: row.logo_url,
+    accountantEmail: row.accountant_email,
+    paymentInstructions: row.payment_instructions,
+    paypalFallbackUrl: row.paypal_fallback_url,
+    invoicePrefix: row.invoice_prefix,
+    nextInvoiceNumber: Number(row.next_invoice_number),
+  };
+}
+
+function clientView(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    company: row.company,
+    address: row.address,
+  };
+}
+
+function invoiceView(row, db = database()) {
+  const paid = Number(
+    db
+      .prepare(
+        "SELECT COALESCE(SUM(amount_minor),0) paid FROM payments WHERE invoice_id=? AND status='active'",
+      )
+      .get(row.id).paid,
+  );
+  const total = Number(row.total_minor);
+  const balance = Math.max(0, total - paid);
+  const stripe = db
+    .prepare(
+      "SELECT id,amount_minor,currency,url,status,livemode FROM stripe_sessions WHERE invoice_id=? ORDER BY created_at DESC LIMIT 1",
+    )
+    .get(row.id);
+  return {
+    id: row.id,
+    invoiceNumber: row.invoice_number,
+    clientId: row.client_id,
+    clientName: row.client_name ?? "",
+    clientEmail: row.client_email ?? "",
+    state: row.state,
+    paymentStatus:
+      paid === 0 ? "unpaid" : balance === 0 ? "paid" : "partially_paid",
+    overdue:
+      row.state === "issued" &&
+      balance > 0 &&
+      row.due_date < new Date().toISOString().slice(0, 10),
+    currency: row.currency,
+    issueDate: row.issue_date,
+    dueDate: row.due_date,
+    terms: row.terms,
+    notes: row.notes,
+    lines: JSON.parse(row.lines_json),
+    taxes: JSON.parse(row.taxes_json),
+    subtotalMinor: Number(row.subtotal_minor),
+    taxMinor: Number(row.tax_minor),
+    totalMinor: total,
+    paymentsMinor: paid,
+    balanceMinor: balance,
+    voidReason: row.void_reason,
+    replacesInvoiceId: row.replaces_invoice_id,
+    replacedByInvoiceId: row.replaced_by_invoice_id,
+    stripeCheckout: stripe
+      ? {
+          id: stripe.id,
+          amountMinor: Number(stripe.amount_minor),
+          currency: stripe.currency,
+          url: stripe.url,
+          status: stripe.status,
+          livemode: Boolean(stripe.livemode),
+        }
+      : null,
+  };
+}
+
+function findInvoice(id, db = database()) {
+  const row = db
+    .prepare(
+      "SELECT i.*, c.name client_name, c.email client_email FROM invoices i JOIN clients c ON c.id=i.client_id WHERE i.id=?",
+    )
+    .get(id);
+  if (!row) throw problem(404, "Invoice not found");
+  return invoiceView(row, db);
+}
+
+function audit(db, entityType, entityId, action, details) {
+  db.prepare("INSERT INTO audit_events VALUES (?,?,?,?,?,?)").run(
+    randomUUID(),
+    entityType,
+    entityId,
+    action,
+    JSON.stringify(details),
+    now(),
+  );
+}
+
+export function dashboard() {
+  const db = database();
+  const clients = db
+    .prepare("SELECT * FROM clients ORDER BY name COLLATE NOCASE")
+    .all()
+    .map(clientView);
+  const invoices = db
+    .prepare(
+      "SELECT i.*, c.name client_name, c.email client_email FROM invoices i JOIN clients c ON c.id=i.client_id ORDER BY i.created_at DESC",
+    )
+    .all()
+    .map((row) => invoiceView(row, db));
+  const payments = db
+    .prepare(
+      "SELECT p.*, i.invoice_number FROM payments p JOIN invoices i ON i.id=p.invoice_id ORDER BY p.payment_date DESC, p.created_at DESC",
+    )
+    .all()
+    .map((row) => ({
+      id: row.id,
+      invoiceId: row.invoice_id,
+      invoiceNumber: row.invoice_number,
+      paymentDate: row.payment_date,
+      method: row.method,
+      currency: row.currency,
+      amountMinor: Number(row.amount_minor),
+      reference: row.reference,
+      notes: row.notes,
+      status: row.status,
+      correctionOfId: row.correction_of_id,
+    }));
+  return { settings: settings(db), clients, invoices, payments };
+}
+
+export function createClient(input) {
+  const db = database();
+  const id = randomUUID();
+  const timestamp = now();
+  const value = {
+    name: text(input.name, "Client name", 160, true),
+    email: email(input.email, "Client email", true),
+    company: text(input.company ?? "", "Company", 160),
+    address: text(input.address ?? "", "Address", 1000),
+  };
+  db.prepare("INSERT INTO clients VALUES (?,?,?,?,?,?,?)").run(
+    id,
+    value.name,
+    value.email,
+    value.company,
+    value.address,
+    timestamp,
+    timestamp,
+  );
+  audit(db, "client", id, "created", { name: value.name });
+  return { id, ...value };
+}
+
+export function saveSettings(input) {
+  const value = {
+    name: text(input.name, "Business name", 160, true),
+    email: email(input.email, "Billing email", true),
+    address: text(input.address ?? "", "Business address", 1000),
+    gstNumber: text(input.gstNumber ?? "", "GST number", 40),
+    qstNumber: text(input.qstNumber ?? "", "QST number", 40),
+    logoUrl: text(input.logoUrl ?? "", "Logo URL", 1000),
+    accountantEmail: email(input.accountantEmail ?? "", "Accountant email"),
+    paymentInstructions: text(
+      input.paymentInstructions ?? "",
+      "Payment instructions",
+      2000,
+    ),
+    paypalFallbackUrl: text(input.paypalFallbackUrl ?? "", "PayPal link", 1000),
+    invoicePrefix: text(input.invoicePrefix, "Invoice prefix", 12, true),
+    nextInvoiceNumber: integer(
+      input.nextInvoiceNumber,
+      "Next invoice number",
+      1,
+      9_999_999,
+    ),
+  };
+  if (!/^[A-Z0-9-]+$/.test(value.invoicePrefix))
+    throw problem(
+      400,
+      "Invoice prefix can use capital letters, numbers and hyphens",
+    );
+  const db = database();
+  db.prepare(
+    "UPDATE business_settings SET name=?,email=?,address=?,gst_number=?,qst_number=?,logo_url=?,accountant_email=?,payment_instructions=?,paypal_fallback_url=?,invoice_prefix=?,next_invoice_number=? WHERE id=1",
+  ).run(
+    value.name,
+    value.email,
+    value.address,
+    value.gstNumber,
+    value.qstNumber,
+    value.logoUrl,
+    value.accountantEmail,
+    value.paymentInstructions,
+    value.paypalFallbackUrl,
+    value.invoicePrefix,
+    value.nextInvoiceNumber,
+  );
+  audit(db, "business", "1", "settings_updated", {
+    invoicePrefix: value.invoicePrefix,
+  });
+  return value;
+}
+
+function validatedDraft(input) {
+  const value = {
+    clientId: text(input.clientId, "Client", 100, true),
+    currency: currency(input.currency),
+    issueDate: date(input.issueDate, "Invoice date"),
+    dueDate: date(input.dueDate, "Due date"),
+    terms: text(input.terms ?? "", "Terms", 2000),
+    notes: text(input.notes ?? "", "Notes", 5000),
+  };
+  if (value.dueDate < value.issueDate)
+    throw problem(400, "Due date cannot be before invoice date");
+  return { ...value, ...calculate(input.lines, input.taxes ?? []) };
+}
+
+export function saveDraft(input, id) {
+  const db = database();
+  const value = validatedDraft(input);
+  if (!db.prepare("SELECT id FROM clients WHERE id=?").get(value.clientId))
+    throw problem(400, "Choose a saved client");
+  const timestamp = now();
+  if (id) {
+    const existing = findInvoice(id, db);
+    if (existing.state !== "draft")
+      throw problem(409, "Issued invoices are frozen and cannot be edited");
+    db.prepare(
+      "UPDATE invoices SET client_id=?,currency=?,issue_date=?,due_date=?,terms=?,notes=?,lines_json=?,taxes_json=?,subtotal_minor=?,tax_minor=?,total_minor=?,updated_at=? WHERE id=?",
+    ).run(
+      value.clientId,
+      value.currency,
+      value.issueDate,
+      value.dueDate,
+      value.terms,
+      value.notes,
+      JSON.stringify(value.lines),
+      JSON.stringify(value.taxes),
+      value.subtotalMinor,
+      value.taxMinor,
+      value.totalMinor,
+      timestamp,
+      id,
+    );
+    audit(db, "invoice", id, "draft_updated", {
+      totalMinor: value.totalMinor,
+      currency: value.currency,
+    });
+    return findInvoice(id, db);
+  }
+  const invoiceId = randomUUID();
+  db.prepare(
+    "INSERT INTO invoices(id,invoice_number,client_id,state,currency,issue_date,due_date,terms,notes,lines_json,taxes_json,subtotal_minor,tax_minor,total_minor,snapshot_json,pdf_filename,void_reason,replaces_invoice_id,replaced_by_invoice_id,created_at,updated_at,issued_at) VALUES (?,NULL,?,'draft',?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,NULL,NULL,?,?,NULL)",
+  ).run(
+    invoiceId,
+    value.clientId,
+    value.currency,
+    value.issueDate,
+    value.dueDate,
+    value.terms,
+    value.notes,
+    JSON.stringify(value.lines),
+    JSON.stringify(value.taxes),
+    value.subtotalMinor,
+    value.taxMinor,
+    value.totalMinor,
+    timestamp,
+    timestamp,
+  );
+  audit(db, "invoice", invoiceId, "draft_created", {
+    totalMinor: value.totalMinor,
+    currency: value.currency,
+  });
+  return findInvoice(invoiceId, db);
+}
+
+function pdfEscape(value) {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)")
+    .replace(/[^\x20-\x7E]/g, "?");
+}
+
+function makePdf(snapshot) {
+  const money = (minor) => `${snapshot.currency} ${(minor / 100).toFixed(2)}`;
+  const rows = [
+    { text: snapshot.business.name, size: 20 },
+    { text: snapshot.business.email, size: 10 },
+    ...snapshot.business.address
+      .split("\n")
+      .map((text) => ({ text, size: 10 })),
+    ...(snapshot.business.gstNumber
+      ? [{ text: `GST number: ${snapshot.business.gstNumber}`, size: 9 }]
+      : []),
+    ...(snapshot.business.qstNumber
+      ? [{ text: `QST number: ${snapshot.business.qstNumber}`, size: 9 }]
+      : []),
+    { text: "", size: 10 },
+    { text: "INVOICE", size: 24 },
+    { text: `Invoice ${snapshot.invoiceNumber}`, size: 12 },
+    {
+      text: `Issued ${snapshot.issueDate}  |  Due ${snapshot.dueDate}`,
+      size: 11,
+    },
+    { text: "", size: 10 },
+    { text: `Bill to: ${snapshot.client.name}`, size: 13 },
+    { text: snapshot.client.company, size: 10 },
+    ...snapshot.client.address.split("\n").map((text) => ({ text, size: 10 })),
+    { text: "", size: 10 },
+    { text: "Services", size: 13 },
+    ...snapshot.lines.map((line) => ({
+      text: `${line.description}   ${line.quantity} x ${money(line.rateMinor)}   ${money(line.amountMinor)}`,
+      size: 10,
+    })),
+    { text: "", size: 10 },
+    { text: `Subtotal: ${money(snapshot.subtotalMinor)}`, size: 11 },
+    ...snapshot.taxes.map((tax) => ({
+      text: `${tax.label} (${(tax.rateThousandths / 1000).toFixed(3).replace(/\.?0+$/, "")}%): ${money(tax.amountMinor)}`,
+      size: 10,
+    })),
+    { text: `TOTAL: ${money(snapshot.totalMinor)}`, size: 15 },
+    { text: "", size: 10 },
+    { text: `Terms: ${snapshot.terms || "None"}`, size: 10 },
+    { text: `Notes: ${snapshot.notes || "None"}`, size: 10 },
+    {
+      text: `Payment: ${snapshot.business.paymentInstructions || "Contact us for payment instructions."}`,
+      size: 10,
+    },
+  ];
+  const wrapped = rows.flatMap((row) => {
+    if (!row.text) return [row];
+    const limit = row.size >= 20 ? 42 : row.size >= 13 ? 64 : 88;
+    const words = row.text.split(/\s+/);
+    const lines = [];
+    let current = "";
+    for (const word of words) {
+      if (current && `${current} ${word}`.length > limit) {
+        lines.push(current);
+        current = word;
+      } else current = current ? `${current} ${word}` : word;
+    }
+    if (current) lines.push(current);
+    return (lines.length ? lines : [""]).map((text) => ({ ...row, text }));
+  });
+  const pages = [];
+  for (let index = 0; index < wrapped.length; index += 36)
+    pages.push(wrapped.slice(index, index + 36));
+  const pageIds = pages.map((_, index) => 4 + index * 2);
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  pages.forEach((page, index) => {
+    const contentId = 5 + index * 2;
+    let y = 755;
+    const content = page
+      .map((row) => {
+        const line = `BT /F1 ${row.size} Tf 54 ${y} Td (${pdfEscape(row.text)}) Tj ET`;
+        y -= row.size + 8;
+        return line;
+      })
+      .join("\n");
+    objects.push(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`,
+      `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`,
+    );
+  });
+  let output = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(output));
+    output += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xref = Buffer.byteLength(output);
+  output += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets
+    .slice(1)
+    .map((offset) => `${String(offset).padStart(10, "0")} 00000 n `)
+    .join(
+      "\n",
+    )}\ntrailer << /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return Buffer.from(output);
+}
+
+export function issueInvoice(id) {
+  const db = database();
+  let savedPdf;
+  let temporaryPdf;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const invoice = findInvoice(id, db);
+    if (invoice.state !== "draft")
+      throw problem(409, "Only a draft can be issued");
+    const business = settings(db);
+    const client = clientView(
+      db.prepare("SELECT * FROM clients WHERE id=?").get(invoice.clientId),
+    );
+    const amounts = calculate(invoice.lines, invoice.taxes);
+    const invoiceNumber = `${business.invoicePrefix}${String(business.nextInvoiceNumber).padStart(5, "0")}`;
+    const snapshot = {
+      business,
+      client,
+      invoiceNumber,
+      currency: invoice.currency,
+      issueDate: invoice.issueDate,
+      dueDate: invoice.dueDate,
+      terms: invoice.terms,
+      notes: invoice.notes,
+      ...amounts,
+    };
+    const pdfRoot = path.join(dataRoot(), "pdfs");
+    mkdirSync(pdfRoot, { recursive: true });
+    temporaryPdf = path.join(pdfRoot, `${id}.${randomUUID()}.tmp`);
+    savedPdf = path.join(pdfRoot, `${id}.pdf`);
+    writeFileSync(temporaryPdf, makePdf(snapshot), { flag: "wx" });
+    renameSync(temporaryPdf, savedPdf);
+    temporaryPdf = undefined;
+    const timestamp = now();
+    db.prepare(
+      "UPDATE business_settings SET next_invoice_number=next_invoice_number+1 WHERE id=1",
+    ).run();
+    db.prepare(
+      "UPDATE invoices SET invoice_number=?,state='issued',lines_json=?,taxes_json=?,subtotal_minor=?,tax_minor=?,total_minor=?,snapshot_json=?,pdf_filename=?,issued_at=?,updated_at=? WHERE id=?",
+    ).run(
+      invoiceNumber,
+      JSON.stringify(amounts.lines),
+      JSON.stringify(amounts.taxes),
+      amounts.subtotalMinor,
+      amounts.taxMinor,
+      amounts.totalMinor,
+      JSON.stringify(snapshot),
+      `${id}.pdf`,
+      timestamp,
+      timestamp,
+      id,
+    );
+    audit(db, "invoice", id, "issued", {
+      invoiceNumber,
+      totalMinor: amounts.totalMinor,
+      currency: invoice.currency,
+    });
+    db.exec("COMMIT");
+    return findInvoice(id, db);
+  } catch (error) {
+    db.exec("ROLLBACK");
+    if (savedPdf && existsSync(savedPdf)) unlinkSync(savedPdf);
+    if (temporaryPdf && existsSync(temporaryPdf)) unlinkSync(temporaryPdf);
+    throw error;
+  }
+}
+
+export function recordPayment(input) {
+  const db = database();
+  const value = {
+    invoiceId: text(input.invoiceId, "Invoice", 100, true),
+    paymentDate: date(input.paymentDate, "Payment date"),
+    method: input.method,
+    amountMinor: integer(input.amountMinor, "Amount", 1, 10_000_000_000),
+    currency: currency(input.currency),
+    reference: text(input.reference ?? "", "Reference", 200),
+    notes: text(input.notes ?? "", "Notes", 1000),
+  };
+  if (!["paypal", "bank_transfer", "other"].includes(value.method))
+    throw problem(400, "Payment method is invalid");
+  const invoice = findInvoice(value.invoiceId, db);
+  if (invoice.state !== "issued")
+    throw problem(409, "Payments can only be added to issued invoices");
+  if (invoice.currency !== value.currency)
+    throw problem(400, "Payment currency must match the invoice");
+  if (value.amountMinor > invoice.balanceMinor)
+    throw problem(400, "Payment is more than the remaining balance");
+  const id = randomUUID();
+  db.prepare("INSERT INTO payments VALUES (?,?,?,?,?,?,?,?,?,?,?)").run(
+    id,
+    value.invoiceId,
+    value.paymentDate,
+    value.method,
+    value.currency,
+    value.amountMinor,
+    value.reference,
+    value.notes,
+    "active",
+    null,
+    now(),
+  );
+  audit(db, "payment", id, "recorded", {
+    invoiceId: value.invoiceId,
+    amountMinor: value.amountMinor,
+    currency: value.currency,
+  });
+  return findInvoice(value.invoiceId, db);
+}
+
+export function correctPayment(input) {
+  const db = database();
+  const paymentId = text(input.paymentId, "Payment", 100, true);
+  const amountMinor = integer(input.amountMinor, "Amount", 1, 10_000_000_000);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const original = db
+      .prepare("SELECT * FROM payments WHERE id=?")
+      .get(paymentId);
+    if (!original || original.status !== "active")
+      throw problem(404, "Active payment not found");
+    const invoice = findInvoice(original.invoice_id, db);
+    if (amountMinor > invoice.balanceMinor + Number(original.amount_minor))
+      throw problem(400, "Corrected payment is more than the invoice balance");
+    db.prepare("UPDATE payments SET status='corrected' WHERE id=?").run(
+      paymentId,
+    );
+    const id = randomUUID();
+    db.prepare("INSERT INTO payments VALUES (?,?,?,?,?,?,?,?,?,?,?)").run(
+      id,
+      original.invoice_id,
+      original.payment_date,
+      original.method,
+      original.currency,
+      amountMinor,
+      text(input.reference ?? "", "Reference", 200),
+      text(input.notes ?? "", "Notes", 1000),
+      "active",
+      paymentId,
+      now(),
+    );
+    audit(db, "payment", id, "corrected", {
+      correctionOfId: paymentId,
+      oldAmountMinor: original.amount_minor,
+      newAmountMinor: amountMinor,
+    });
+    db.exec("COMMIT");
+    return findInvoice(original.invoice_id, db);
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export function voidAndReissue(invoiceId, rawReason) {
+  const db = database();
+  const reason = text(rawReason, "Reason", 1000, true);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const original = findInvoice(invoiceId, db);
+    if (original.state !== "issued")
+      throw problem(409, "Only an issued invoice can be voided");
+    if (original.paymentsMinor > 0)
+      throw problem(
+        409,
+        "Paid or partially paid invoices need accountant review",
+      );
+    const replacementId = randomUUID();
+    const timestamp = now();
+    db.prepare(
+      "INSERT INTO invoices(id,invoice_number,client_id,state,currency,issue_date,due_date,terms,notes,lines_json,taxes_json,subtotal_minor,tax_minor,total_minor,snapshot_json,pdf_filename,void_reason,replaces_invoice_id,replaced_by_invoice_id,created_at,updated_at,issued_at) VALUES (?,NULL,?,'draft',?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,NULL,?,?,NULL)",
+    ).run(
+      replacementId,
+      original.clientId,
+      original.currency,
+      original.issueDate,
+      original.dueDate,
+      original.terms,
+      original.notes,
+      JSON.stringify(
+        original.lines.map(({ amountMinor: _amount, ...line }) => line),
+      ),
+      JSON.stringify(
+        original.taxes.map(({ amountMinor: _amount, ...tax }) => tax),
+      ),
+      original.subtotalMinor,
+      original.taxMinor,
+      original.totalMinor,
+      invoiceId,
+      timestamp,
+      timestamp,
+    );
+    db.prepare(
+      "UPDATE invoices SET state='void',void_reason=?,replaced_by_invoice_id=?,updated_at=? WHERE id=?",
+    ).run(reason, replacementId, timestamp, invoiceId);
+    audit(db, "invoice", invoiceId, "voided", { reason, replacementId });
+    db.exec("COMMIT");
+    return findInvoice(replacementId, db);
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export function payableInvoice(invoiceId) {
+  return findInvoice(text(invoiceId, "Invoice", 100, true));
+}
+
+export function reusableStripeSession(invoiceId) {
+  const invoice = payableInvoice(invoiceId);
+  const session = database()
+    .prepare(
+      "SELECT * FROM stripe_sessions WHERE invoice_id=? AND status='open' AND amount_minor=? AND currency=? ORDER BY created_at DESC LIMIT 1",
+    )
+    .get(invoice.id, invoice.balanceMinor, invoice.currency);
+  return session
+    ? {
+        id: session.id,
+        invoiceId: session.invoice_id,
+        amountMinor: Number(session.amount_minor),
+        currency: session.currency,
+        url: session.url,
+        status: session.status,
+        livemode: Boolean(session.livemode),
+      }
+    : null;
+}
+
+export function saveStripeSession(invoiceId, stripeSession) {
+  const db = database();
+  const invoice = findInvoice(invoiceId, db);
+  if (invoice.state !== "issued" || invoice.balanceMinor < 1)
+    throw problem(409, "This invoice has no payable balance");
+  const value = {
+    id: text(stripeSession.id, "Stripe session", 255, true),
+    amountMinor: integer(
+      stripeSession.amount_total,
+      "Stripe amount",
+      1,
+      10_000_000_000,
+    ),
+    currency: currency(String(stripeSession.currency ?? "").toUpperCase()),
+    url: text(stripeSession.url, "Stripe payment URL", 3000, true),
+    livemode: stripeSession.livemode ? 1 : 0,
+  };
+  if (value.amountMinor !== invoice.balanceMinor)
+    throw problem(409, "Stripe amount does not match the invoice balance");
+  if (value.currency !== invoice.currency)
+    throw problem(409, "Stripe currency does not match the invoice");
+  if (!value.url.startsWith("https://"))
+    throw problem(409, "Stripe did not return a secure payment URL");
+  const timestamp = now();
+  db.prepare("INSERT INTO stripe_sessions VALUES (?,?,?,?,?,'open',?,?,?)").run(
+    value.id,
+    invoice.id,
+    value.amountMinor,
+    value.currency,
+    value.url,
+    value.livemode,
+    timestamp,
+    timestamp,
+  );
+  audit(db, "invoice", invoice.id, "stripe_checkout_created", {
+    sessionId: value.id,
+    amountMinor: value.amountMinor,
+    currency: value.currency,
+    livemode: Boolean(value.livemode),
+  });
+  return findInvoice(invoice.id, db);
+}
+
+export function stripeSessionsToSync() {
+  return database()
+    .prepare(
+      "SELECT id,invoice_id FROM stripe_sessions WHERE status='open' ORDER BY created_at",
+    )
+    .all()
+    .map((row) => ({ id: row.id, invoiceId: row.invoice_id }));
+}
+
+export function updateStripeSessionStatus(sessionId, status) {
+  if (!["open", "expired"].includes(status))
+    throw problem(400, "Stripe session status is invalid");
+  database()
+    .prepare("UPDATE stripe_sessions SET status=?,updated_at=? WHERE id=?")
+    .run(status, now(), text(sessionId, "Stripe session", 255, true));
+}
+
+export function recordStripePayment(input) {
+  const db = database();
+  const eventId = text(input.eventId, "Stripe event", 255, true);
+  const sessionId = text(input.sessionId, "Stripe session", 255, true);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const session = db
+      .prepare("SELECT * FROM stripe_sessions WHERE id=?")
+      .get(sessionId);
+    if (!session) throw problem(404, "Stripe session was not found");
+    if (input.invoiceId && input.invoiceId !== session.invoice_id)
+      throw problem(409, "Stripe invoice reference does not match");
+    const invoice = findInvoice(session.invoice_id, db);
+    if (db.prepare("SELECT id FROM stripe_events WHERE id=?").get(eventId)) {
+      db.exec("COMMIT");
+      return invoice;
+    }
+    const amountMinor = integer(
+      input.amountMinor,
+      "Stripe amount",
+      1,
+      10_000_000_000,
+    );
+    const paidCurrency = currency(String(input.currency ?? "").toUpperCase());
+    if (
+      amountMinor !== Number(session.amount_minor) ||
+      paidCurrency !== session.currency
+    )
+      throw problem(409, "Stripe payment does not match the saved checkout");
+    if (session.status === "paid") {
+      db.prepare("INSERT INTO stripe_events VALUES (?,?,?)").run(
+        eventId,
+        text(input.eventType ?? "sync", "Stripe event type", 100, true),
+        now(),
+      );
+      db.exec("COMMIT");
+      return invoice;
+    }
+    if (invoice.balanceMinor < amountMinor)
+      throw problem(
+        409,
+        "Stripe payment is greater than the current invoice balance; review it manually",
+      );
+    const paymentId = randomUUID();
+    const timestamp = now();
+    db.prepare("INSERT INTO payments VALUES (?,?,?,?,?,?,?,?,?,?,?)").run(
+      paymentId,
+      invoice.id,
+      timestamp.slice(0, 10),
+      "stripe",
+      session.currency,
+      amountMinor,
+      session.id,
+      "Verified Stripe Checkout payment",
+      "active",
+      null,
+      timestamp,
+    );
+    db.prepare(
+      "UPDATE stripe_sessions SET status='paid',updated_at=? WHERE id=?",
+    ).run(timestamp, session.id);
+    db.prepare("INSERT INTO stripe_events VALUES (?,?,?)").run(
+      eventId,
+      text(input.eventType ?? "sync", "Stripe event type", 100, true),
+      timestamp,
+    );
+    audit(db, "payment", paymentId, "stripe_payment_recorded", {
+      invoiceId: invoice.id,
+      sessionId: session.id,
+      amountMinor,
+      currency: session.currency,
+    });
+    db.exec("COMMIT");
+    return findInvoice(invoice.id, db);
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export function readPdf(id) {
+  const row = database()
+    .prepare(
+      "SELECT invoice_number,pdf_filename,state FROM invoices WHERE id=?",
+    )
+    .get(id);
+  if (!row?.pdf_filename || row.state === "draft")
+    throw problem(404, "Issued PDF not found");
+  const file = path.join(dataRoot(), "pdfs", row.pdf_filename);
+  if (!existsSync(file))
+    throw problem(500, "The saved PDF is missing; restore it from backup");
+  return { bytes: readFileSync(file), filename: `${row.invoice_number}.pdf` };
+}
+
+function csvCell(value) {
+  let clean = String(value ?? "");
+  if (/^[\t\r\n ]*[=+\-@]/.test(clean)) clean = `'${clean}`;
+  return `"${clean.replace(/"/g, '""')}"`;
+}
+
+export function invoiceCsv() {
+  return invoiceCsvFor(dashboard().invoices.filter((invoice) => invoice.state !== "draft"));
+}
+
+function taxBreakdown(invoice) {
+  const result = { gstMinor: 0, qstMinor: 0, otherTaxMinor: 0 };
+  for (const tax of invoice.taxes) {
+    const label = String(tax.label).trim().toUpperCase();
+    if (["GST", "TPS"].includes(label)) result.gstMinor += tax.amountMinor;
+    else if (["QST", "TVQ"].includes(label)) result.qstMinor += tax.amountMinor;
+    else result.otherTaxMinor += tax.amountMinor;
+  }
+  return result;
+}
+
+function invoiceCsvFor(invoices) {
+  const rows = invoices.map((invoice) => {
+    const taxes = taxBreakdown(invoice);
+    return [
+      invoice.invoiceNumber,
+      invoice.clientName,
+      invoice.issueDate,
+      invoice.dueDate,
+      invoice.currency,
+      (invoice.subtotalMinor / 100).toFixed(2),
+      (taxes.gstMinor / 100).toFixed(2),
+      (taxes.qstMinor / 100).toFixed(2),
+      (taxes.otherTaxMinor / 100).toFixed(2),
+      (invoice.taxMinor / 100).toFixed(2),
+      (invoice.totalMinor / 100).toFixed(2),
+      (invoice.paymentsMinor / 100).toFixed(2),
+      (invoice.balanceMinor / 100).toFixed(2),
+      invoice.state,
+    ];
+  });
+  return [
+    [
+      "invoice_number",
+      "client",
+      "issue_date",
+      "due_date",
+      "currency",
+      "subtotal",
+      "gst",
+      "qst",
+      "other_tax",
+      "tax",
+      "total",
+      "payments",
+      "balance",
+      "invoice_state",
+    ],
+    ...rows,
+  ]
+    .map((row) => row.map(csvCell).join(","))
+    .join("\r\n");
+}
+
+export function paymentCsv() {
+  return paymentCsvFor(dashboard().payments);
+}
+
+function paymentCsvFor(payments) {
+  const rows = payments.map((payment) => [
+    payment.invoiceNumber,
+    payment.paymentDate,
+    payment.method,
+    payment.currency,
+    (payment.amountMinor / 100).toFixed(2),
+    payment.reference,
+    payment.status,
+  ]);
+  return [
+    [
+      "invoice_reference",
+      "payment_date",
+      "method",
+      "currency",
+      "amount",
+      "transaction_reference",
+      "status",
+    ],
+    ...rows,
+  ]
+    .map((row) => row.map(csvCell).join(","))
+    .join("\r\n");
+}
+
+function accountantYear(rawYear) {
+  if (rawYear === undefined || rawYear === null || rawYear === "") return null;
+  if (!/^\d{4}$/.test(String(rawYear)))
+    throw problem(400, "Choose a valid four-digit year");
+  const year = Number(rawYear);
+  if (year < 2000 || year > 2200)
+    throw problem(400, "Choose a year from 2000 to 2200");
+  return String(year);
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1)
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function zip(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name.replaceAll("\\", "/"), "utf8");
+    const contents = Buffer.isBuffer(entry.contents)
+      ? entry.contents
+      : Buffer.from(entry.contents, "utf8");
+    const checksum = crc32(contents);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt32LE(checksum, 14);
+    local.writeUInt32LE(contents.length, 18);
+    local.writeUInt32LE(contents.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    localParts.push(local, name, contents);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt32LE(checksum, 16);
+    central.writeUInt32LE(contents.length, 20);
+    central.writeUInt32LE(contents.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, name);
+    offset += local.length + name.length + contents.length;
+  }
+  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralSize, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...localParts, ...centralParts, end]);
+}
+
+function packageSummary({ business, year, invoices, payments }) {
+  const active = invoices.filter((invoice) => invoice.state === "issued");
+  const currencies = [...new Set([...invoices, ...payments].map((item) => item.currency))].sort();
+  const lines = [
+    "INVOICE DESK - ACCOUNTANT PACKAGE",
+    "",
+    `Business: ${business.name}`,
+    `Period: ${year ?? "All records"}`,
+    `Created: ${new Date().toISOString()}`,
+    `Finalized invoices included: ${invoices.length}`,
+    `Payments included: ${payments.length}`,
+    "",
+    "TOTALS BY CURRENCY (active invoices only; void invoices are excluded)",
+  ];
+  for (const currency of currencies) {
+    const matchingInvoices = active.filter((invoice) => invoice.currency === currency);
+    const matchingPayments = payments.filter(
+      (payment) => payment.currency === currency && payment.status === "active",
+    );
+    const totals = matchingInvoices.reduce(
+      (sum, invoice) => {
+        const taxes = taxBreakdown(invoice);
+        sum.subtotal += invoice.subtotalMinor;
+        sum.gst += taxes.gstMinor;
+        sum.qst += taxes.qstMinor;
+        sum.otherTax += taxes.otherTaxMinor;
+        sum.total += invoice.totalMinor;
+        sum.balance += invoice.balanceMinor;
+        return sum;
+      },
+      { subtotal: 0, gst: 0, qst: 0, otherTax: 0, total: 0, balance: 0 },
+    );
+    const paid = matchingPayments.reduce((sum, payment) => sum + payment.amountMinor, 0);
+    const amount = (minor) => `${currency} ${(minor / 100).toFixed(2)}`;
+    lines.push(
+      "",
+      currency,
+      `  Subtotal: ${amount(totals.subtotal)}`,
+      `  GST: ${amount(totals.gst)}`,
+      `  QST: ${amount(totals.qst)}`,
+      `  Other tax: ${amount(totals.otherTax)}`,
+      `  Invoice total: ${amount(totals.total)}`,
+      `  Active payments dated in period: ${amount(paid)}`,
+      `  Current balance on included invoices: ${amount(totals.balance)}`,
+    );
+  }
+  lines.push(
+    "",
+    "NOTES",
+    "- CAD and USD totals are intentionally kept separate and are never converted.",
+    "- invoice-records.csv includes separate GST, QST, other-tax, and total-tax columns.",
+    "- payment-records.csv includes active and corrected entries for an audit trail.",
+    "- Void invoices are included as records but excluded from the totals above.",
+    "- Drafts are never included.",
+  );
+  return lines.join("\r\n");
+}
+
+export function accountantPackage(rawYear) {
+  const year = accountantYear(rawYear);
+  const data = dashboard();
+  const inPeriod = (date) => !year || String(date).startsWith(`${year}-`);
+  const invoices = data.invoices.filter(
+    (invoice) => invoice.state !== "draft" && inPeriod(invoice.issueDate),
+  );
+  const payments = data.payments.filter((payment) => inPeriod(payment.paymentDate));
+  const entries = [
+    {
+      name: "README.txt",
+      contents: packageSummary({
+        business: data.settings,
+        year,
+        invoices,
+        payments,
+      }),
+    },
+    { name: "invoice-records.csv", contents: invoiceCsvFor(invoices) },
+    { name: "payment-records.csv", contents: paymentCsvFor(payments) },
+  ];
+  for (const invoice of invoices) {
+    const pdf = readPdf(invoice.id);
+    entries.push({ name: `invoices/${pdf.filename}`, contents: pdf.bytes });
+  }
+  return {
+    bytes: zip(entries),
+    filename: `accountant-package-${year ?? "all-records"}.zip`,
+    invoiceCount: invoices.length,
+    paymentCount: payments.length,
+  };
+}
+
+export function closeDatabase() {
+  cached?.db.close();
+  cached = undefined;
+}

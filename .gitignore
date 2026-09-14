@@ -1,0 +1,22 @@
+# Private application data
+data/
+backups/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.pdf
+*.zip
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Tooling and operating-system files
+node_modules/
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
