@@ -21,3 +21,7 @@ I have published it as free, open-source software. It is an early beta, not acco
 ## Suggested repository description
 
 A tiny, self-hosted invoicing app for small teams—saved services, Gmail delivery, PDFs, payments, Québec taxes, Stripe Checkout, and monthly accountant exports.
+
+## Comparison graphic
+
+Use `invoice-desk-comparison.png` as the optional LinkedIn image. The comparison is intentionally narrow and includes the limitation that Invoice Desk is focused invoicing rather than full accounting software. Pricing and plan claims are documented in `comparison-notes.md`.
