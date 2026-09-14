@@ -215,6 +215,27 @@ function mimeMessage(payload, fromEmail) {
   return Buffer.from(message).toString("base64url");
 }
 
+function textMimeMessage(payload, fromEmail) {
+  const senderName = header(payload.senderName ?? "Invoice Desk", "Sender name");
+  const unsubscribeEmail = header(
+    payload.unsubscribeEmail ?? fromEmail,
+    "Unsubscribe email",
+  );
+  const message = [
+    `From: ${senderName} <${header(fromEmail, "Sender")}>`,
+    `To: ${header(payload.recipientEmail, "Recipient")}`,
+    `Subject: ${header(payload.subject, "Subject")}`,
+    `List-Unsubscribe: <mailto:${unsubscribeEmail}?subject=Unsubscribe>`,
+    "MIME-Version: 1.0",
+    'Content-Type: text/plain; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    base64Lines(payload.bodyText),
+    "",
+  ].join("\r\n");
+  return Buffer.from(message).toString("base64url");
+}
+
 export async function sendGmailMessage(payload, connection) {
   if (!connection) throw new Error("Connect Gmail before sending");
   const token = await accessToken(connection);
@@ -229,6 +250,28 @@ export async function sendGmailMessage(payload, connection) {
       body: JSON.stringify({ raw: mimeMessage(payload, connection.email) }),
     },
     "Gmail send",
+  );
+  if (!result.id)
+    throw Object.assign(new Error("Gmail accepted no message identifier"), {
+      status: 502,
+    });
+  return { id: result.id };
+}
+
+export async function sendGmailTextMessage(payload, connection) {
+  if (!connection) throw new Error("Connect Gmail before sending a campaign");
+  const token = await accessToken(connection);
+  const result = await googleRequest(
+    `${GMAIL_API_BASE}/users/me/messages/send`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ raw: textMimeMessage(payload, connection.email) }),
+    },
+    "Gmail campaign send",
   );
   if (!result.id)
     throw Object.assign(new Error("Gmail accepted no message identifier"), {

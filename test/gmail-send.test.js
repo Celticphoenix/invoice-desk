@@ -77,4 +77,29 @@ test("exchanges Google authorization and sends a PDF through Gmail", async () =>
   assert.match(mime, /To: client@example\.test/);
   assert.match(mime, /Subject: Invoice INV-TEST/);
   assert.match(mime, /INV-TEST\.pdf/);
+
+  const campaign = await email.sendGmailTextMessage(
+    {
+      senderName: "Fictional Agency",
+      recipientEmail: "marketing@example.test",
+      subject: "Fictional campaign",
+      bodyText: "A fictional campaign body with unsubscribe instructions.",
+      unsubscribeEmail: "sender@example.test",
+    },
+    {
+      email: authorization.email,
+      refreshTokenCipher: email.encryptRefreshToken(authorization.refreshToken),
+    },
+  );
+  assert.equal(campaign.id, "gmail-message-123");
+  const campaignRequest = requests.filter((entry) =>
+    entry.url.includes("/users/me/messages/send"),
+  )[1];
+  const campaignMime = Buffer.from(
+    JSON.parse(campaignRequest.body).raw,
+    "base64url",
+  ).toString();
+  assert.match(campaignMime, /To: marketing@example\.test/);
+  assert.match(campaignMime, /List-Unsubscribe: <mailto:sender@example\.test\?subject=Unsubscribe>/);
+  assert.doesNotMatch(campaignMime, /Content-Type: application\/pdf/);
 });

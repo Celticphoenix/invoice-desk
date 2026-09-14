@@ -5,6 +5,7 @@ let notice = "";
 let editor = null;
 let clientEditorId = null;
 let serviceEditorId = null;
+let campaignEditorId = null;
 
 const revenueCategories = [
   "Services",
@@ -101,13 +102,14 @@ function loginScreen(error = "") {
 }
 
 function shell(content) {
-  app.innerHTML = `<header><button class="brand" data-view="invoices"><span class="brand-mark">N</span><span><b>Invoice Desk</b><small>Private &amp; internal</small></span></button><nav><button data-view="invoices" class="${view === "invoices" ? "active" : ""}">Invoices</button><button data-view="services" class="${view === "services" ? "active" : ""}">Services &amp; prices</button><button data-view="clients" class="${view === "clients" ? "active" : ""}">Clients</button><button data-view="settings" class="${view === "settings" ? "active" : ""}">Settings</button></nav><button class="signout" id="signout">Sign out</button></header>${notice ? `<div class="toast">${escapeHtml(notice)}</div>` : ""}<main class="page">${content}</main>`;
+  app.innerHTML = `<header><button class="brand" data-view="invoices"><span class="brand-mark">N</span><span><b>Invoice Desk</b><small>Private &amp; internal</small></span></button><nav><button data-view="invoices" class="${view === "invoices" ? "active" : ""}">Invoices</button><button data-view="services" class="${view === "services" ? "active" : ""}">Services &amp; prices</button><button data-view="clients" class="${view === "clients" ? "active" : ""}">Clients</button><button data-view="campaigns" class="${view === "campaigns" ? "active" : ""}">Campaigns</button><button data-view="settings" class="${view === "settings" ? "active" : ""}">Settings</button></nav><button class="signout" id="signout">Sign out</button></header>${notice ? `<div class="toast">${escapeHtml(notice)}</div>` : ""}<main class="page">${content}</main>`;
   document.querySelectorAll("[data-view]").forEach((button) =>
     button.addEventListener("click", () => {
       view = button.dataset.view;
       editor = null;
       clientEditorId = null;
       serviceEditorId = null;
+      campaignEditorId = null;
       notice = "";
       render();
     }),
@@ -591,8 +593,9 @@ function bindEditor() {
 
 function clientsScreen() {
   const editing = data.clients.find((client) => client.id === clientEditorId);
+  const marketingStatus = editing?.marketingStatus ?? "needs_review";
   shell(
-    `<section class="simple"><p class="kicker">Saved address book · ${data.clients.length} clients</p><h1>Clients</h1><p>Add a client once, then choose them on every future invoice.</p><div class="two-column"><form class="card-form" id="client-form"><h2>${editing ? "Edit client" : "Add a client"}</h2><label>Name<input name="name" value="${escapeHtml(editing?.name ?? "")}" required /></label><label>Email <small>optional until you need to send an invoice</small><input name="email" type="email" value="${escapeHtml(editing?.email ?? "")}" /></label><label>Company <small>optional</small><input name="company" value="${escapeHtml(editing?.company ?? "")}" /></label><label>Phone <small>optional</small><input name="phone" value="${escapeHtml(editing?.phone ?? "")}" /></label><label>Billing address<textarea name="address">${escapeHtml(editing?.address ?? "")}</textarea></label><label>Private notes <small>never shown on invoices</small><textarea name="notes">${escapeHtml(editing?.notes ?? "")}</textarea></label><div class="form-buttons">${editing ? `<button type="button" class="secondary" id="cancel-client-edit">Cancel</button>` : ""}<button class="primary">${editing ? "Save changes" : "+ Save client"}</button></div></form><div class="client-list">${data.clients.map((client) => `<article><span class="avatar">${escapeHtml(client.name[0])}</span><div><h3>${escapeHtml(client.name)}</h3><p>${escapeHtml(client.company || "Individual")}</p><small>${escapeHtml(client.email || "Email not added yet")}${client.phone ? ` · ${escapeHtml(client.phone)}` : ""}</small></div><button class="secondary" data-edit-client="${client.id}">Edit</button></article>`).join("")}</div></div></section>`,
+    `<section class="simple"><p class="kicker">Saved address book · ${data.clients.length} clients</p><h1>Clients</h1><p>Add a client once, then choose them on every future invoice. Marketing permission is kept separate from ordinary invoice email.</p><div class="two-column"><form class="card-form" id="client-form"><h2>${editing ? "Edit client" : "Add a client"}</h2><label>Name<input name="name" value="${escapeHtml(editing?.name ?? "")}" required /></label><label>Email <small>optional until you need to send an invoice</small><input name="email" type="email" value="${escapeHtml(editing?.email ?? "")}" /></label><label>Company <small>optional</small><input name="company" value="${escapeHtml(editing?.company ?? "")}" /></label><label>Phone <small>optional</small><input name="phone" value="${escapeHtml(editing?.phone ?? "")}" /></label><label>Billing address<textarea name="address">${escapeHtml(editing?.address ?? "")}</textarea></label><label>Private notes <small>never shown on invoices</small><textarea name="notes">${escapeHtml(editing?.notes ?? "")}</textarea></label><fieldset class="permission-box"><legend>Marketing email permission</legend><p>Invoices do not require this setting. Campaigns do.</p><label>Status<select name="marketingStatus"><option value="needs_review" ${marketingStatus === "needs_review" ? "selected" : ""}>Needs review — do not market</option><option value="express" ${marketingStatus === "express" ? "selected" : ""}>Express consent</option><option value="implied" ${marketingStatus === "implied" ? "selected" : ""}>Implied consent with expiry</option><option value="unsubscribed" ${marketingStatus === "unsubscribed" ? "selected" : ""}>Unsubscribed — always block</option></select></label><label>How permission was obtained <small>required for express consent</small><input name="marketingConsentSource" value="${escapeHtml(editing?.marketingConsentSource ?? "")}" placeholder="Example: signed form or phone call" /></label><div class="grid"><label>Permission date <small>optional</small><input type="date" name="marketingConsentAt" value="${escapeHtml(editing?.marketingConsentAt ?? "")}" /></label><label>Implied-consent expiry <small>required for implied consent</small><input type="date" name="marketingConsentExpiresAt" value="${escapeHtml(editing?.marketingConsentExpiresAt ?? "")}" /></label></div></fieldset><div class="form-buttons">${editing ? `<button type="button" class="secondary" id="cancel-client-edit">Cancel</button>` : ""}<button class="primary">${editing ? "Save changes" : "+ Save client"}</button></div></form><div class="client-list">${data.clients.map((client) => `<article><span class="avatar">${escapeHtml(client.name[0])}</span><div><h3>${escapeHtml(client.name)}</h3><p>${escapeHtml(client.company || "Individual")}</p><small>${escapeHtml(client.email || "Email not added yet")}${client.phone ? ` · ${escapeHtml(client.phone)}` : ""}</small><span class="permission-badge ${client.marketing.eligible ? "allowed" : client.marketingStatus === "unsubscribed" ? "blocked" : "review"}">${client.marketing.eligible ? "Campaigns allowed" : escapeHtml(client.marketing.reason)}</span></div><button class="secondary" data-edit-client="${client.id}">Edit</button></article>`).join("")}</div></div></section>`,
   );
   document.querySelector("#client-form").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -617,6 +620,61 @@ function clientsScreen() {
     clientEditorId = null;
     render();
   });
+}
+
+function campaignsScreen() {
+  const eligible = data.clients.filter((client) => client.marketing.eligible);
+  const blocked = data.clients.length - eligible.length;
+  const editing = data.campaigns?.find((campaign) => campaign.id === campaignEditorId && campaign.status === "draft");
+  const selected = new Set(editing?.recipients.map((recipient) => recipient.clientId) ?? []);
+  const history = data.campaigns ?? [];
+  shell(
+    `<section class="simple campaigns"><p class="kicker">Consent-aware email</p><h1>Campaigns</h1><p>Choose approved clients and send each person a separate email through the connected Gmail account. Nobody can see anyone else’s address.</p><div class="campaign-safety"><b>${eligible.length} eligible · ${blocked} blocked or needing review</b><span>Maximum 50 recipients per campaign. Unsubscribed and expired contacts are automatically excluded.</span></div><div class="two-column"><form class="card-form" id="campaign-form"><h2>${editing ? "Edit campaign" : "Create a campaign"}</h2><label>Internal campaign name<input name="name" value="${escapeHtml(editing?.name ?? "")}" placeholder="Example: September update" required /></label><label>Email subject<input name="subject" value="${escapeHtml(editing?.subject ?? "")}" required /></label><label>Message <small>the greeting, business address and unsubscribe instructions are added automatically</small><textarea name="bodyText" rows="9" required>${escapeHtml(editing?.bodyText ?? "")}</textarea></label><fieldset class="recipient-picker"><legend>Who should receive it?</legend>${eligible.length ? `<label class="select-all"><input type="checkbox" id="select-all" ${selected.size === eligible.length && eligible.length ? "checked" : ""} /> Select all eligible clients</label><div>${eligible.map((client) => `<label><input type="checkbox" name="clientIds" value="${client.id}" ${selected.has(client.id) ? "checked" : ""} /> <span>${escapeHtml(client.name)}<small>${escapeHtml(client.email)}</small></span></label>`).join("")}</div>` : `<p>No clients are approved for marketing yet. Open Clients and record permission first.</p>`}</fieldset><div class="form-buttons">${editing ? `<button type="button" class="secondary" id="cancel-campaign-edit">Cancel</button>` : ""}<button class="primary" ${eligible.length ? "" : "disabled"}>Save draft</button></div></form><div class="campaign-history"><h2>Campaign history</h2>${history.length ? history.map((campaign) => { const sent = campaign.recipients.filter((r) => r.status === "sent").length; const failed = campaign.recipients.filter((r) => r.status === "failed").length; const skipped = campaign.recipients.filter((r) => r.status === "skipped").length; return `<article><div><span class="permission-badge ${campaign.status === "sent" ? "allowed" : campaign.status === "partial" ? "blocked" : "review"}">${escapeHtml(campaign.status)}</span><h3>${escapeHtml(campaign.name)}</h3><p>${escapeHtml(campaign.subject)}</p><small>${campaign.recipients.length} selected · ${sent} sent${failed ? ` · ${failed} failed` : ""}${skipped ? ` · ${skipped} skipped` : ""}</small><details><summary>Preview message</summary><pre>Hello [client name],\n\n${escapeHtml(campaign.bodyText)}\n\n— Business identity and unsubscribe instructions are added automatically —</pre></details></div><div class="campaign-actions">${campaign.status === "draft" ? `<button class="secondary" data-edit-campaign="${campaign.id}">Edit</button><button class="primary" data-send-campaign="${campaign.id}" data-count="${campaign.recipients.length}">Review &amp; send</button>` : campaign.status === "partial" && failed ? `<button class="primary" data-send-campaign="${campaign.id}" data-count="${failed}">Retry failed</button>` : ""}</div></article>`; }).join("") : `<div class="empty"><h3>No campaigns yet</h3><p>Your first saved draft will appear here.</p></div>`}</div></div><section class="legal-note"><b>Simple safety rules</b><p>Only record express consent when the person actually agreed. For implied consent, enter the expiry date. If anyone asks to stop, mark them Unsubscribed in Clients right away. The app does not use tracking pixels.</p></section></section>`,
+  );
+  document.querySelector("#campaign-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    action(
+      {
+        action: "save-campaign",
+        campaignId: editing?.id,
+        campaign: {
+          name: form.get("name"),
+          subject: form.get("subject"),
+          bodyText: form.get("bodyText"),
+          clientIds: form.getAll("clientIds"),
+        },
+      },
+      "Campaign draft saved. Nothing has been sent.",
+    );
+    campaignEditorId = null;
+  });
+  document.querySelector("#select-all")?.addEventListener("change", (event) => {
+    document.querySelectorAll('input[name="clientIds"]').forEach((input) => {
+      input.checked = event.target.checked;
+    });
+  });
+  document.querySelectorAll("[data-edit-campaign]").forEach((button) =>
+    button.addEventListener("click", () => {
+      campaignEditorId = button.dataset.editCampaign;
+      render();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }),
+  );
+  document.querySelector("#cancel-campaign-edit")?.addEventListener("click", () => {
+    campaignEditorId = null;
+    render();
+  });
+  document.querySelectorAll("[data-send-campaign]").forEach((button) =>
+    button.addEventListener("click", () => {
+      const count = Number(button.dataset.count);
+      if (!confirm(`Send this campaign as ${count} separate email${count === 1 ? "" : "s"}?\n\nOnly eligible clients will be sent. This cannot be undone.`)) return;
+      action(
+        { action: "send-campaign", campaignId: button.dataset.sendCampaign },
+        "Campaign send finished. Check the campaign card for the exact result.",
+      );
+    }),
+  );
 }
 
 function servicesScreen() {
@@ -692,6 +750,7 @@ function render() {
   if (view === "editor") return renderEditor();
   if (view === "services") return servicesScreen();
   if (view === "clients") return clientsScreen();
+  if (view === "campaigns") return campaignsScreen();
   if (view === "settings") return settingsScreen();
   invoicesScreen();
 }

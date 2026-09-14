@@ -6,21 +6,26 @@ import { afterEach, beforeEach, test } from "node:test";
 import {
   accountantPackage,
   calculate,
+  campaignPayloads,
   closeDatabase,
   correctPayment,
   createClient,
   dashboard,
   duplicateInvoice,
   emailPayload,
+  finishCampaign,
   invoiceCsv,
   issueInvoice,
   markEmailAccepted,
   markEmailFailed,
+  markCampaignRecipient,
+  marketingEligibility,
   queueInvoiceEmail,
   readPdf,
   recordPayment,
   recordStripePayment,
   saveDraft,
+  saveCampaign,
   saveClient,
   saveService,
   saveSettings,
@@ -134,6 +139,53 @@ test("rounds quantities and taxes deterministically", () => {
       totalMinor: 11498,
     },
   );
+});
+
+test("campaigns require recorded permission and never include blocked clients", () => {
+  const initial = dashboard().clients[0];
+  assert.equal(initial.marketing.eligible, false);
+  assert.match(initial.marketing.reason, /needs review/i);
+  assert.throws(
+    () => saveCampaign({ name: "Blocked draft", subject: "Test subject", bodyText: "Fictional campaign body", clientIds: [clientId] }),
+    /cannot receive campaigns/i,
+  );
+  saveClient({ ...initial, marketingStatus: "express", marketingConsentSource: "Fictional signed form", marketingConsentAt: "2026-09-14" }, clientId);
+  saveSettings({ ...dashboard().settings, address: "123 Fictional Business Street, Montreal, QC" });
+  const campaign = saveCampaign({ name: "Fictional update", subject: "A fictional client update", bodyText: "This message exists only in an automated test.", clientIds: [clientId] });
+  assert.equal(campaign.status, "draft");
+  const [payload] = campaignPayloads(campaign.id);
+  assert.equal(payload.recipientEmail, "client@example.test");
+  assert.match(payload.bodyText, /reply with UNSUBSCRIBE/i);
+  assert.match(payload.bodyText, /123 Fictional Business Street/);
+  markCampaignRecipient(campaign.id, clientId, { providerMessageId: "fictional-gmail-message" });
+  const finished = finishCampaign(campaign.id);
+  assert.equal(finished.status, "sent");
+  assert.equal(finished.recipients[0].status, "sent");
+  assert.deepEqual(campaignPayloads(campaign.id), []);
+});
+
+test("implied marketing permission expires and campaigns are capped at 50", () => {
+  assert.equal(marketingEligibility({ email: "person@example.test", marketingStatus: "implied", marketingConsentExpiresAt: "2026-09-15" }, "2026-09-14").eligible, true);
+  assert.equal(marketingEligibility({ email: "person@example.test", marketingStatus: "implied", marketingConsentExpiresAt: "2026-09-13" }, "2026-09-14").eligible, false);
+  const ids = [clientId];
+  for (let index = 1; index <= 50; index += 1)
+    ids.push(createClient({ name: `Fictional Client ${index}`, email: `client-${index}@example.test`, marketingStatus: "express", marketingConsentSource: "Fictional test fixture" }).id);
+  assert.throws(
+    () => saveCampaign({ name: "Too large", subject: "Fictional subject", bodyText: "Fictional body", clientIds: ids }),
+    /no more than 50/i,
+  );
+});
+
+test("campaign sending rechecks permission after a draft is saved", () => {
+  const client = dashboard().clients[0];
+  saveClient({ ...client, marketingStatus: "express", marketingConsentSource: "Fictional phone consent" }, clientId);
+  saveSettings({ ...dashboard().settings, address: "123 Fictional Business Street" });
+  const campaign = saveCampaign({ name: "Permission recheck", subject: "Fictional subject", bodyText: "Fictional body", clientIds: [clientId] });
+  saveClient({ ...dashboard().clients[0], marketingStatus: "unsubscribed" }, clientId);
+  assert.deepEqual(campaignPayloads(campaign.id), []);
+  const finished = finishCampaign(campaign.id);
+  assert.equal(finished.recipients[0].status, "skipped");
+  assert.match(finished.recipients[0].lastError, /unsubscribed/i);
 });
 
 test("issues unique numbers when requests arrive together and survives restart", async () => {

@@ -4,23 +4,31 @@
 
 I built a tiny invoicing app because most invoicing software feels heavier than the job.
 
-Invoice Desk is free, open source, self-hosted, and intentionally boring: saved clients and services, invoices, Québec taxes, PDFs, payment tracking, optional Gmail and Stripe connections, and accountant-ready exports.
+Invoice Desk is free, open source, self-hosted, and intentionally boring: saved clients and services, invoices, Québec taxes, PDFs, payment tracking, optional Gmail and Stripe connections, accountant-ready exports, and now small consent-aware client email campaigns.
 
 It started as an internal tool. I am sharing the code in case it is useful to another small team—and in case someone wants to make it better.
 
-## LinkedIn post
+## LinkedIn post — version 1.2
 
-Most small teams do not need an accounting platform just to create a clean invoice, track whether it was paid, and send records to an accountant.
+What started as a small internal invoicing tool keeps teaching me what a real workflow actually needs.
 
-So I built Invoice Desk: a small, self-hosted invoicing application with reusable service pricing, frozen invoice PDFs, Québec GST/QST support, payment tracking, optional send-only Gmail and Stripe connections, and a one-click monthly accountant package.
+The newest addition to Invoice Desk is deliberately modest: selected-client email campaigns. You record whether a client has express consent, time-limited implied consent, needs review, or has unsubscribed. The app blocks ineligible contacts, rechecks them before sending, and emails each approved person separately through Gmail. No visible mailing list and no tracking pixels.
 
-The goal was simple: someone should understand it within a minute without training.
+It is still mainly an invoicing app: saved clients and prices, frozen PDFs, Québec GST/QST, payment tracking, optional Stripe and Gmail, and a monthly accountant package. It is not trying to become full accounting software or a full marketing platform.
 
-I have published it as free, open-source software. It is an early beta, not accounting or tax advice, but the core workflow is useful today. If you try it, I would genuinely like to hear what feels confusing or unnecessary.
+I made it for a small team that needed something simple enough to understand without training. I have released the generic version free and open source under the MIT licence in case it helps someone else—or gives a developer a useful starting point.
+
+It is early beta software, so please use fictional data while testing and read the setup and security notes before hosting it.
+
+https://github.com/Celticphoenix/invoice-desk
+
+If you try it, I would genuinely like to hear what feels confusing, useful, or unnecessary.
+
+#OpenSource #SmallBusiness #Invoicing #BuildInPublic #SelfHosted #CanadianBusiness
 
 ## Suggested repository description
 
-A tiny, self-hosted invoicing app for small teams—saved services, Gmail delivery, PDFs, payments, Québec taxes, Stripe Checkout, and monthly accountant exports.
+A tiny, self-hosted invoicing app for small teams—saved services, Gmail delivery, consent-aware campaigns, PDFs, payments, Québec taxes, Stripe Checkout, and monthly accountant exports.
 
 ## Comparison graphic
 

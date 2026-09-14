@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
   accountantPackage,
+  campaignPayloads,
   closeDatabase,
   correctPayment,
   createClient,
@@ -11,11 +12,13 @@ import {
   disconnectGmail,
   duplicateInvoice,
   emailPayload,
+  finishCampaign,
   gmailConnection,
   invoiceCsv,
   issueInvoice,
   markEmailAccepted,
   markEmailFailed,
+  markCampaignRecipient,
   paymentCsv,
   payableInvoice,
   readPdf,
@@ -25,6 +28,7 @@ import {
   queueInvoiceEmail,
   saveDraft,
   saveClient,
+  saveCampaign,
   saveGmailConnection,
   saveService,
   saveSettings,
@@ -39,6 +43,7 @@ import {
   gmailAuthorizationUrl,
   gmailStatus,
   sendGmailMessage,
+  sendGmailTextMessage,
 } from "./email.js";
 import {
   createCheckoutSession,
@@ -280,6 +285,29 @@ async function retryEmail(outboxId) {
   return state.connected ? sendOutbox(refreshed.id) : refreshed;
 }
 
+async function sendCampaign(campaignId) {
+  const connection = gmailConnection();
+  if (!gmailStatus(connection).connected)
+    throw Object.assign(new Error("Connect Gmail in Settings before sending a campaign"), {
+      status: 409,
+    });
+  const senderName = dashboard().settings.name;
+  const payloads = campaignPayloads(campaignId);
+  for (const payload of payloads) {
+    try {
+      const sent = await sendGmailTextMessage({ ...payload, senderName }, connection);
+      markCampaignRecipient(payload.campaignId, payload.clientId, {
+        providerMessageId: sent.id,
+      });
+    } catch (error) {
+      markCampaignRecipient(payload.campaignId, payload.clientId, {
+        error: error.message,
+      });
+    }
+  }
+  return finishCampaign(campaignId);
+}
+
 function sameOrigin(request) {
   const origin = request.headers.origin;
   return (
@@ -425,6 +453,8 @@ const server = createServer(async (request, response) => {
       const actions = {
         "create-client": () => createClient(input.client),
         "save-client": () => saveClient(input.client, input.clientId),
+        "save-campaign": () => saveCampaign(input.campaign, input.campaignId),
+        "send-campaign": () => sendCampaign(input.campaignId),
         "save-service": () => saveService(input.service, input.serviceId),
         "save-settings": () => saveSettings(input.settings),
         "save-draft": () => saveDraft(input.invoice, input.invoiceId),

@@ -50,7 +50,11 @@ function migrate(db) {
     CREATE TABLE IF NOT EXISTS clients(
       id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, company TEXT NOT NULL,
       address TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
-      source_key TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      source_key TEXT NOT NULL DEFAULT '',
+      marketing_status TEXT NOT NULL DEFAULT 'needs_review' CHECK(marketing_status IN ('needs_review','express','implied','unsubscribed')),
+      marketing_consent_source TEXT NOT NULL DEFAULT '', marketing_consent_at TEXT,
+      marketing_consent_expires_at TEXT, marketing_unsubscribed_at TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS services(
       id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
@@ -103,11 +107,24 @@ function migrate(db) {
       attempt_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
       accepted_at TEXT, UNIQUE(invoice_id,recipient_type)
     );
+    CREATE TABLE IF NOT EXISTS campaigns(
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, subject TEXT NOT NULL, body_text TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('draft','sending','sent','partial')),
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL, sent_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS campaign_recipients(
+      campaign_id TEXT NOT NULL REFERENCES campaigns(id), client_id TEXT NOT NULL REFERENCES clients(id),
+      recipient_email TEXT NOT NULL, recipient_name TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','sent','failed','skipped')),
+      provider_message_id TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '', sent_at TEXT,
+      PRIMARY KEY(campaign_id,client_id)
+    );
     CREATE INDEX IF NOT EXISTS invoice_client_idx ON invoices(client_id);
     CREATE INDEX IF NOT EXISTS payment_invoice_idx ON payments(invoice_id);
     CREATE INDEX IF NOT EXISTS stripe_invoice_idx ON stripe_sessions(invoice_id);
     CREATE INDEX IF NOT EXISTS service_name_idx ON services(name COLLATE NOCASE);
     CREATE INDEX IF NOT EXISTS email_invoice_idx ON email_outbox(invoice_id);
+    CREATE INDEX IF NOT EXISTS campaign_status_idx ON campaigns(status,created_at);
   `);
   db.prepare("INSERT OR IGNORE INTO schema_migrations VALUES (1, ?)").run(
     now(),
@@ -266,6 +283,39 @@ function migrate(db) {
     `);
     db.prepare("INSERT INTO schema_migrations VALUES (6, ?)").run(now());
   }
+  if (
+    !db.prepare("SELECT version FROM schema_migrations WHERE version=7").get()
+  ) {
+    const clientColumns = new Set(
+      db.prepare("PRAGMA table_info(clients)").all().map((row) => row.name),
+    );
+    if (!clientColumns.has("marketing_status"))
+      db.exec("ALTER TABLE clients ADD COLUMN marketing_status TEXT NOT NULL DEFAULT 'needs_review'");
+    if (!clientColumns.has("marketing_consent_source"))
+      db.exec("ALTER TABLE clients ADD COLUMN marketing_consent_source TEXT NOT NULL DEFAULT ''");
+    if (!clientColumns.has("marketing_consent_at"))
+      db.exec("ALTER TABLE clients ADD COLUMN marketing_consent_at TEXT");
+    if (!clientColumns.has("marketing_consent_expires_at"))
+      db.exec("ALTER TABLE clients ADD COLUMN marketing_consent_expires_at TEXT");
+    if (!clientColumns.has("marketing_unsubscribed_at"))
+      db.exec("ALTER TABLE clients ADD COLUMN marketing_unsubscribed_at TEXT");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS campaigns(
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, subject TEXT NOT NULL, body_text TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('draft','sending','sent','partial')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, sent_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS campaign_recipients(
+        campaign_id TEXT NOT NULL REFERENCES campaigns(id), client_id TEXT NOT NULL REFERENCES clients(id),
+        recipient_email TEXT NOT NULL, recipient_name TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','sent','failed','skipped')),
+        provider_message_id TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '', sent_at TEXT,
+        PRIMARY KEY(campaign_id,client_id)
+      );
+      CREATE INDEX IF NOT EXISTS campaign_status_idx ON campaigns(status,created_at);
+    `);
+    db.prepare("INSERT INTO schema_migrations VALUES (7, ?)").run(now());
+  }
 }
 
 function problem(status, message) {
@@ -292,6 +342,13 @@ function date(value, name) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(clean))
     throw problem(400, `${name} is invalid`);
   return clean;
+}
+
+function optionalDate(value, name) {
+  const clean = text(value ?? "", name, 10);
+  if (clean && !/^\d{4}-\d{2}-\d{2}$/.test(clean))
+    throw problem(400, `${name} is invalid`);
+  return clean || null;
 }
 
 function integer(value, name, minimum, maximum) {
@@ -408,8 +465,24 @@ function settings(db = database()) {
   };
 }
 
+export function marketingEligibility(client, asOf = new Date().toISOString().slice(0, 10)) {
+  if (!client.email) return { eligible: false, reason: "No email address" };
+  if (client.marketingStatus === "unsubscribed")
+    return { eligible: false, reason: "Unsubscribed" };
+  if (client.marketingStatus === "express")
+    return { eligible: true, reason: "Express consent recorded" };
+  if (client.marketingStatus === "implied") {
+    if (!client.marketingConsentExpiresAt)
+      return { eligible: false, reason: "Add the implied-consent expiry date" };
+    if (client.marketingConsentExpiresAt < asOf)
+      return { eligible: false, reason: "Implied consent expired" };
+    return { eligible: true, reason: `Implied consent until ${client.marketingConsentExpiresAt}` };
+  }
+  return { eligible: false, reason: "Marketing permission needs review" };
+}
+
 function clientView(row) {
-  return {
+  const client = {
     id: row.id,
     name: row.name,
     email: row.email,
@@ -417,7 +490,13 @@ function clientView(row) {
     address: row.address,
     phone: row.phone ?? "",
     notes: row.notes ?? "",
+    marketingStatus: row.marketing_status ?? "needs_review",
+    marketingConsentSource: row.marketing_consent_source ?? "",
+    marketingConsentAt: row.marketing_consent_at ?? "",
+    marketingConsentExpiresAt: row.marketing_consent_expires_at ?? "",
+    marketingUnsubscribedAt: row.marketing_unsubscribed_at ?? "",
   };
+  return { ...client, marketing: marketingEligibility(client) };
 }
 
 function serviceView(row) {
@@ -507,6 +586,34 @@ function outboxView(row) {
   };
 }
 
+function campaignView(row, db = database()) {
+  const recipients = db
+    .prepare(
+      "SELECT * FROM campaign_recipients WHERE campaign_id=? ORDER BY recipient_name COLLATE NOCASE",
+    )
+    .all(row.id)
+    .map((recipient) => ({
+      clientId: recipient.client_id,
+      email: recipient.recipient_email,
+      name: recipient.recipient_name,
+      status: recipient.status,
+      providerMessageId: recipient.provider_message_id,
+      lastError: recipient.last_error,
+      sentAt: recipient.sent_at,
+    }));
+  return {
+    id: row.id,
+    name: row.name,
+    subject: row.subject,
+    bodyText: row.body_text,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    sentAt: row.sent_at,
+    recipients,
+  };
+}
+
 function findOutbox(outboxId, db = database()) {
   const id = text(outboxId, "Email", 100, true);
   const row = db
@@ -579,7 +686,11 @@ export function dashboard() {
     )
     .all()
     .map(outboxView);
-  return { settings: settings(db), clients, services, invoices, payments, emailOutbox };
+  const campaigns = db
+    .prepare("SELECT * FROM campaigns ORDER BY created_at DESC")
+    .all()
+    .map((row) => campaignView(row, db));
+  return { settings: settings(db), clients, services, invoices, payments, emailOutbox, campaigns };
 }
 
 export function createClient(input) {
@@ -601,15 +712,46 @@ export function saveClient(input, id) {
     address: text(input.address ?? "", "Address", 1000),
     phone: text(input.phone ?? "", "Phone", 80),
     notes: text(input.notes ?? "", "Client notes", 2000),
+    marketingStatus: text(
+      input.marketingStatus ?? existing?.marketing_status ?? "needs_review",
+      "Marketing permission",
+      30,
+      true,
+    ),
+    marketingConsentSource: text(
+      input.marketingConsentSource ?? existing?.marketing_consent_source ?? "",
+      "Permission source",
+      500,
+    ),
+    marketingConsentAt: optionalDate(
+      input.marketingConsentAt ?? existing?.marketing_consent_at ?? "",
+      "Permission date",
+    ),
+    marketingConsentExpiresAt: optionalDate(
+      input.marketingConsentExpiresAt ?? existing?.marketing_consent_expires_at ?? "",
+      "Permission expiry",
+    ),
     sourceKey: text(
       input.sourceKey ?? existing?.source_key ?? "",
       "Source key",
       500,
     ),
   };
+  if (!["needs_review", "express", "implied", "unsubscribed"].includes(value.marketingStatus))
+    throw problem(400, "Marketing permission is invalid");
+  if (value.marketingStatus === "express" && !value.marketingConsentSource)
+    throw problem(400, "Record how express consent was obtained");
+  if (value.marketingStatus === "implied" && !value.marketingConsentExpiresAt)
+    throw problem(400, "Add the implied-consent expiry date");
+  const unsubscribedAt =
+    value.marketingStatus === "unsubscribed"
+      ? existing?.marketing_unsubscribed_at ?? timestamp
+      : existing?.marketing_unsubscribed_at ?? null;
   if (id) {
     db.prepare(
-      "UPDATE clients SET name=?,email=?,company=?,address=?,phone=?,notes=?,source_key=?,updated_at=? WHERE id=?",
+      `UPDATE clients SET name=?,email=?,company=?,address=?,phone=?,notes=?,source_key=?,
+       marketing_status=?,marketing_consent_source=?,marketing_consent_at=?,
+       marketing_consent_expires_at=?,marketing_unsubscribed_at=?,updated_at=? WHERE id=?`,
     ).run(
       value.name,
       value.email,
@@ -618,13 +760,21 @@ export function saveClient(input, id) {
       value.phone,
       value.notes,
       value.sourceKey,
+      value.marketingStatus,
+      value.marketingConsentSource,
+      value.marketingConsentAt,
+      value.marketingConsentExpiresAt,
+      unsubscribedAt,
       timestamp,
       clientId,
     );
     audit(db, "client", clientId, "updated", { name: value.name });
   } else {
     db.prepare(
-      "INSERT INTO clients(id,name,email,company,address,phone,notes,source_key,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      `INSERT INTO clients(id,name,email,company,address,phone,notes,source_key,
+       marketing_status,marketing_consent_source,marketing_consent_at,
+       marketing_consent_expires_at,marketing_unsubscribed_at,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       clientId,
       value.name,
@@ -634,6 +784,11 @@ export function saveClient(input, id) {
       value.phone,
       value.notes,
       value.sourceKey,
+      value.marketingStatus,
+      value.marketingConsentSource,
+      value.marketingConsentAt,
+      value.marketingConsentExpiresAt,
+      unsubscribedAt,
       timestamp,
       timestamp,
     );
@@ -1396,6 +1551,163 @@ export function disconnectGmail() {
   if (existing)
     audit(db, "gmail", "1", "disconnected", { email: existing.email });
   return { disconnected: true };
+}
+
+function findCampaign(campaignId, db = database()) {
+  const id = text(campaignId, "Campaign", 100, true);
+  const row = db.prepare("SELECT * FROM campaigns WHERE id=?").get(id);
+  if (!row) throw problem(404, "Campaign not found");
+  return row;
+}
+
+export function buildCampaignBody(campaign, recipient, business) {
+  const businessName = text(business.name, "Business name", 160, true);
+  const businessEmail = email(business.email, "Business email", true);
+  const businessAddress = text(business.address, "Business address", 1000, true);
+  if (/^add your business address/i.test(businessAddress))
+    throw problem(400, "Add the real business mailing address in Settings before sending a campaign");
+  return [
+    `Hello ${text(recipient.name, "Recipient name", 160, true)},`,
+    "",
+    text(campaign.bodyText, "Campaign message", 10000, true),
+    "",
+    "---",
+    `Sent by ${businessName}`,
+    businessAddress,
+    `Contact: ${businessEmail}`,
+    `To stop marketing emails, reply with UNSUBSCRIBE or email ${businessEmail} with the subject “Unsubscribe”.`,
+  ].join("\r\n");
+}
+
+export function saveCampaign(input, id) {
+  const db = database();
+  const campaignId = id ? text(id, "Campaign", 100, true) : randomUUID();
+  const existing = id ? findCampaign(campaignId, db) : null;
+  if (existing && existing.status !== "draft")
+    throw problem(409, "A campaign can only be edited before it is sent");
+  const clientIds = [...new Set(Array.isArray(input.clientIds) ? input.clientIds : [])]
+    .map((clientId) => text(clientId, "Selected client", 100, true));
+  if (!clientIds.length) throw problem(400, "Choose at least one eligible client");
+  if (clientIds.length > 50)
+    throw problem(400, "Choose no more than 50 clients for one campaign");
+  const clients = clientIds.map((clientId) => {
+    const row = db.prepare("SELECT * FROM clients WHERE id=?").get(clientId);
+    if (!row) throw problem(404, "A selected client no longer exists");
+    const client = clientView(row);
+    if (!client.marketing.eligible)
+      throw problem(400, `${client.name} cannot receive campaigns: ${client.marketing.reason}`);
+    return client;
+  });
+  const value = {
+    name: text(input.name, "Campaign name", 160, true),
+    subject: text(input.subject, "Email subject", 200, true),
+    bodyText: text(input.bodyText, "Campaign message", 10000, true),
+  };
+  const timestamp = now();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare(
+      `INSERT INTO campaigns(id,name,subject,body_text,status,created_at,updated_at,sent_at)
+       VALUES (?,?,?,?,'draft',?,?,NULL)
+       ON CONFLICT(id) DO UPDATE SET name=excluded.name,subject=excluded.subject,
+       body_text=excluded.body_text,updated_at=excluded.updated_at`,
+    ).run(campaignId, value.name, value.subject, value.bodyText, timestamp, timestamp);
+    db.prepare("DELETE FROM campaign_recipients WHERE campaign_id=?").run(campaignId);
+    const add = db.prepare(
+      `INSERT INTO campaign_recipients(
+       campaign_id,client_id,recipient_email,recipient_name,status,provider_message_id,last_error,sent_at
+       ) VALUES (?,?,?,?,'pending','','',NULL)`,
+    );
+    for (const client of clients)
+      add.run(campaignId, client.id, client.email, client.name);
+    audit(db, "campaign", campaignId, existing ? "updated" : "created", {
+      recipientCount: clients.length,
+    });
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return campaignView(findCampaign(campaignId, db), db);
+}
+
+export function campaignPayloads(campaignId) {
+  const db = database();
+  const campaign = campaignView(findCampaign(campaignId, db), db);
+  if (campaign.status === "sent") return [];
+  if (!["draft", "partial"].includes(campaign.status))
+    throw problem(409, "This campaign is already being sent");
+  const business = settings(db);
+  buildCampaignBody(campaign, { name: "Preview recipient" }, business);
+  const rows = db
+    .prepare(
+      `SELECT r.*,c.* FROM campaign_recipients r
+       JOIN clients c ON c.id=r.client_id
+       WHERE r.campaign_id=? AND r.status IN ('pending','failed')
+       ORDER BY r.recipient_name COLLATE NOCASE`,
+    )
+    .all(campaign.id);
+  if (!rows.length) return [];
+  if (rows.length > 50) throw problem(400, "Campaigns are limited to 50 recipients");
+  const payloads = [];
+  for (const row of rows) {
+    const client = clientView(row);
+    if (!client.marketing.eligible) {
+      db.prepare(
+        "UPDATE campaign_recipients SET status='skipped',last_error=? WHERE campaign_id=? AND client_id=?",
+      ).run(client.marketing.reason, campaign.id, client.id);
+      continue;
+    }
+    payloads.push({
+      campaignId: campaign.id,
+      clientId: client.id,
+      recipientEmail: row.recipient_email,
+      subject: campaign.subject,
+      bodyText: buildCampaignBody(campaign, { name: row.recipient_name }, business),
+      unsubscribeEmail: business.email,
+    });
+  }
+  db.prepare("UPDATE campaigns SET status='sending',updated_at=? WHERE id=?").run(now(), campaign.id);
+  return payloads;
+}
+
+export function markCampaignRecipient(campaignId, clientId, result) {
+  const db = database();
+  const campaign = findCampaign(campaignId, db);
+  const recipientId = text(clientId, "Client", 100, true);
+  const status = result?.providerMessageId ? "sent" : "failed";
+  const timestamp = now();
+  const providerId = result?.providerMessageId
+    ? text(result.providerMessageId, "Gmail message", 500, true)
+    : "";
+  const error = providerId
+    ? ""
+    : text(result?.error ?? "Email provider rejected the message", "Email error", 1000, true);
+  db.prepare(
+    `UPDATE campaign_recipients SET status=?,provider_message_id=?,last_error=?,sent_at=?
+     WHERE campaign_id=? AND client_id=? AND status!='sent'`,
+  ).run(status, providerId, error, providerId ? timestamp : null, campaign.id, recipientId);
+  audit(db, "campaign", campaign.id, `recipient_${status}`, { clientId: recipientId });
+  return campaignView(findCampaign(campaign.id, db), db);
+}
+
+export function finishCampaign(campaignId) {
+  const db = database();
+  const campaign = findCampaign(campaignId, db);
+  const counts = db
+    .prepare(
+      `SELECT status,COUNT(*) count FROM campaign_recipients WHERE campaign_id=? GROUP BY status`,
+    )
+    .all(campaign.id);
+  const totals = Object.fromEntries(counts.map((row) => [row.status, Number(row.count)]));
+  const complete = !totals.pending && !totals.failed;
+  const status = complete ? "sent" : "partial";
+  const timestamp = now();
+  db.prepare(
+    "UPDATE campaigns SET status=?,updated_at=?,sent_at=COALESCE(sent_at,?) WHERE id=?",
+  ).run(status, timestamp, timestamp, campaign.id);
+  audit(db, "campaign", campaign.id, status, totals);
+  return campaignView(findCampaign(campaign.id, db), db);
 }
 
 export function queueInvoiceEmail(invoiceId, mode = "queued") {

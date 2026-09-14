@@ -22,6 +22,9 @@ Invoice Desk started as an internal tool for a small professional-management tea
 - Creates optional Stripe-hosted Checkout links for the exact unpaid balance
 - Sends invoices and PDF attachments through optional send-only Gmail authorization
 - Uses a persistent outbox, safe preview mode, retries, and duplicate-send protection
+- Sends small, selected-client email campaigns as separate messages through Gmail
+- Records express, time-limited implied, needs-review, and unsubscribed marketing states
+- Rechecks permission before every campaign message and limits each send to 50 recipients
 - Exports formula-safe invoice and payment CSV files
 - Downloads a monthly accountant ZIP with PDFs, records, GST/QST totals, and revenue by category
 - Imports authorized FreshBooks client and item exports with duplicate-safe reruns
@@ -29,7 +32,7 @@ Invoice Desk started as an internal tool for a small professional-management tea
 
 ## Deliberate limitations
 
-This is not a multi-tenant SaaS platform. One installation represents one business and uses one shared application password. It does not include expense accounting, payroll, bank feeds, exchange-rate conversion, or tax filing.
+This is not a multi-tenant SaaS platform. One installation represents one business and uses one shared application password. It does not include expense accounting, payroll, bank feeds, exchange-rate conversion, tax filing, automated unsubscribe web links, bounce processing, delivery analytics, or open tracking.
 
 ## Quick start
 
@@ -98,6 +101,14 @@ Without Google credentials, **Review & Send** stays in safe preview mode and tra
 
 Invoice Desk cannot read the connected inbox. The Google refresh token is encrypted before SQLite storage. Every installation must use its own Google OAuth application credentials; no credentials are included in this repository.
 
+### Selected-client campaigns
+
+Campaign email is deliberately conservative. New and imported clients default to **Needs review** and cannot receive a campaign. An operator must record express consent or a still-valid implied-consent expiry date. Unsubscribed clients are always blocked, and eligibility is checked again immediately before each individual message is sent.
+
+Every campaign message includes the business identity, mailing address, contact email, and instructions to unsubscribe by reply or email. The app also adds a `List-Unsubscribe` mailto header. It sends separate messages—never a visible recipient list—and limits one action to 50 recipients.
+
+Operators remain responsible for determining whether they have lawful permission, keeping adequate consent evidence, promptly recording unsubscribe requests, and following the laws that apply to them. For Canadian use, review the [CRTC’s CASL guidance](https://crtc.gc.ca/eng/com500/guide.htm). This feature is not legal advice or a replacement for a dedicated marketing platform when automation, one-click web unsubscribe, bounce handling, or high-volume delivery is required.
+
 ## Data and backups
 
 Private state lives in `data/` by default. That directory is ignored by Git and must be stored on a persistent, access-controlled disk.
@@ -126,7 +137,7 @@ Use `USD` instead of `CAD` when appropriate. The importer adds or updates client
 node --test
 ```
 
-Tests cover financial rounding, Québec taxes, concurrent invoice numbering, immutable records and PDFs, currency separation, saved services, client editing, invoice duplication, payments and corrections, void-and-reissue, safe exports, monthly accountant ZIPs, Gmail authorization and delivery, exact Stripe amounts, and signed webhooks.
+Tests cover financial rounding, Québec taxes, concurrent invoice numbering, immutable records and PDFs, currency separation, saved services, client editing, invoice duplication, payments and corrections, void-and-reissue, safe exports, monthly accountant ZIPs, consent-aware campaigns, Gmail authorization and delivery, exact Stripe amounts, and signed webhooks.
 
 ## Email safety
 
