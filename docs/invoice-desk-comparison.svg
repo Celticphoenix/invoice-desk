@@ -70,12 +70,12 @@
   <text x="972" y="485" text-anchor="middle" class="yes">✓</text>
   <text x="972" y="511" text-anchor="middle" class="cell">Gmail send-only</text>
 
-  <text x="69" y="575" class="feature">Built-in client campaigns</text>
+  <text x="69" y="575" class="feature">Email selected clients</text>
   <text x="420" y="575" text-anchor="middle" class="no">Via integration*</text>
   <text x="606" y="575" text-anchor="middle" class="no">Via integration*</text>
   <text x="782" y="575" text-anchor="middle" class="no">Via integration*</text>
   <text x="972" y="563" text-anchor="middle" class="yes">✓</text>
-  <text x="972" y="589" text-anchor="middle" class="cell">Consent-aware</text>
+  <text x="972" y="589" text-anchor="middle" class="cell">Included</text>
 
   <text x="69" y="653" class="feature">Online card payments</text>
   <text x="420" y="653" text-anchor="middle" class="yes">✓</text>
