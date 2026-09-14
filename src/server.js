@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -8,21 +8,38 @@ import {
   correctPayment,
   createClient,
   dashboard,
+  disconnectGmail,
+  duplicateInvoice,
+  emailPayload,
+  gmailConnection,
   invoiceCsv,
   issueInvoice,
+  markEmailAccepted,
+  markEmailFailed,
   paymentCsv,
   payableInvoice,
   readPdf,
   recordPayment,
   recordStripePayment,
   reusableStripeSession,
+  queueInvoiceEmail,
   saveDraft,
+  saveClient,
+  saveGmailConnection,
+  saveService,
   saveSettings,
   saveStripeSession,
   stripeSessionsToSync,
   updateStripeSessionStatus,
   voidAndReissue,
 } from "./core.js";
+import {
+  encryptRefreshToken,
+  exchangeGmailCode,
+  gmailAuthorizationUrl,
+  gmailStatus,
+  sendGmailMessage,
+} from "./email.js";
 import {
   createCheckoutSession,
   retrieveCheckoutSession,
@@ -85,20 +102,35 @@ function sessionToken() {
   return `${expires}.${signature(expires)}`;
 }
 
-function signedIn(request) {
-  const cookies = Object.fromEntries(
+function cookies(request) {
+  return Object.fromEntries(
     String(request.headers.cookie ?? "")
       .split(";")
       .map((part) => part.trim().split("="))
       .filter((pair) => pair.length === 2),
   );
-  const [expires, supplied] = String(cookies.invoice_session ?? "").split(".");
+}
+
+function signedIn(request) {
+  const [expires, supplied] = String(
+    cookies(request).invoice_session ?? "",
+  ).split(".");
   return Boolean(
     expires &&
     supplied &&
     Number(expires) > Date.now() &&
     safeEqual(supplied, signature(expires)),
   );
+}
+
+function redirect(response, location, cookie = "") {
+  response.writeHead(302, {
+    Location: location,
+    "Cache-Control": "no-store",
+    ...securityHeaders,
+    ...(cookie ? { "Set-Cookie": cookie } : {}),
+  });
+  response.end();
 }
 
 function json(response, status, body, headers = {}) {
@@ -197,6 +229,57 @@ async function createStripePayment(invoiceId) {
   }
 }
 
+async function sendOutbox(outboxId) {
+  const connection = gmailConnection();
+  const state = gmailStatus(connection);
+  const payload = emailPayload(outboxId);
+  if (payload.status === "provider_accepted" || !state.connected) return payload;
+  try {
+    const sent = await sendGmailMessage(payload, connection);
+    return markEmailAccepted(outboxId, sent.id);
+  } catch (error) {
+    markEmailFailed(outboxId, error.message);
+    throw error;
+  }
+}
+
+async function reviewAndSend(invoiceId) {
+  let invoice = dashboard().invoices.find((item) => item.id === invoiceId);
+  if (!invoice)
+    throw Object.assign(new Error("Invoice not found"), { status: 404 });
+  if (!invoice.clientEmail)
+    throw Object.assign(
+      new Error("Add an email address to this client before finalizing and sending"),
+      { status: 400 },
+    );
+  if (invoice.state === "draft") invoice = issueInvoice(invoice.id);
+  if (invoice.state !== "issued")
+    throw Object.assign(new Error("Only an active invoice can be emailed"), {
+      status: 409,
+    });
+  if (invoice.balanceMinor > 0 && stripeStatus().enabled)
+    await createStripePayment(invoice.id);
+  const connection = gmailConnection();
+  const state = gmailStatus(connection);
+  const outbox = queueInvoiceEmail(
+    invoice.id,
+    state.connected ? "queued" : "preview",
+  );
+  return state.connected ? sendOutbox(outbox.id) : outbox;
+}
+
+async function retryEmail(outboxId) {
+  const prior = emailPayload(outboxId);
+  if (prior.status === "provider_accepted") return prior;
+  const connection = gmailConnection();
+  const state = gmailStatus(connection);
+  const refreshed = queueInvoiceEmail(
+    prior.invoiceId,
+    state.connected ? "queued" : "preview",
+  );
+  return state.connected ? sendOutbox(refreshed.id) : refreshed;
+}
+
 function sameOrigin(request) {
   const origin = request.headers.origin;
   return (
@@ -228,8 +311,6 @@ const server = createServer(async (request, response) => {
       });
       return response.end(contents);
     }
-    if (request.method === "GET" && url.pathname === "/api/health")
-      return json(response, 200, { ok: true });
     if (request.method === "GET" && url.pathname === "/api/session")
       return json(response, 200, {
         authenticated: signedIn(request),
@@ -280,8 +361,50 @@ const server = createServer(async (request, response) => {
         },
       );
     }
+    if (request.method === "GET" && url.pathname === "/api/gmail/callback") {
+      const expectedState = String(cookies(request).gmail_oauth_state ?? "");
+      const suppliedState = String(url.searchParams.get("state") ?? "");
+      if (
+        !expectedState ||
+        !suppliedState ||
+        !safeEqual(expectedState, suppliedState)
+      )
+        return json(response, 403, {
+          error: "Gmail connection expired. Start again from Settings.",
+        });
+      const expiredStateCookie =
+        "gmail_oauth_state=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0";
+      if (url.searchParams.get("error"))
+        return redirect(response, "/?gmail=not-connected", expiredStateCookie);
+      const result = await exchangeGmailCode(
+        String(url.searchParams.get("code") ?? ""),
+      );
+      const expectedEmail = dashboard().settings.email.toLowerCase();
+      if (result.email !== expectedEmail)
+        throw Object.assign(
+          new Error(`Please connect ${expectedEmail}, not ${result.email}`),
+          { status: 409 },
+        );
+      saveGmailConnection({
+        email: result.email,
+        refreshTokenCipher: encryptRefreshToken(result.refreshToken),
+      });
+      return redirect(response, "/?gmail=connected", expiredStateCookie);
+    }
     if (!signedIn(request))
       return json(response, 401, { error: "Sign in required" });
+    if (request.method === "GET" && url.pathname === "/api/gmail/connect") {
+      const state = randomBytes(32).toString("base64url");
+      const location = gmailAuthorizationUrl(
+        state,
+        dashboard().settings.email,
+      );
+      return redirect(
+        response,
+        location,
+        `gmail_oauth_state=${state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600${secureCookies ? "; Secure" : ""}`,
+      );
+    }
     if (request.method === "GET" && url.pathname === "/api/dashboard") {
       let stripeError = "";
       try {
@@ -292,6 +415,7 @@ const server = createServer(async (request, response) => {
       return json(response, 200, {
         ...dashboard(),
         stripe: { ...stripeStatus(), error: stripeError },
+        email: gmailStatus(gmailConnection()),
       });
     }
     if (request.method === "POST" && url.pathname === "/api/action") {
@@ -300,6 +424,8 @@ const server = createServer(async (request, response) => {
       const input = await body(request);
       const actions = {
         "create-client": () => createClient(input.client),
+        "save-client": () => saveClient(input.client, input.clientId),
+        "save-service": () => saveService(input.service, input.serviceId),
         "save-settings": () => saveSettings(input.settings),
         "save-draft": () => saveDraft(input.invoice, input.invoiceId),
         issue: () => issueInvoice(input.invoiceId),
@@ -308,6 +434,10 @@ const server = createServer(async (request, response) => {
         "void-reissue": () => voidAndReissue(input.invoiceId, input.reason),
         "stripe-create": () => createStripePayment(input.invoiceId),
         "stripe-sync": () => syncStripePayments(),
+        duplicate: () => duplicateInvoice(input.invoiceId),
+        "review-send": () => reviewAndSend(input.invoiceId),
+        "retry-email": () => retryEmail(input.outboxId),
+        "disconnect-gmail": () => disconnectGmail(),
       };
       if (!Object.hasOwn(actions, input.action))
         return json(response, 400, { error: "Unknown action" });
@@ -346,7 +476,7 @@ const server = createServer(async (request, response) => {
       request.method === "GET" &&
       url.pathname === "/api/export/accountant-package"
     ) {
-      const bundle = accountantPackage(url.searchParams.get("year"));
+      const bundle = accountantPackage(url.searchParams.get("period"));
       response.writeHead(200, {
         "Content-Type": "application/zip",
         "Content-Disposition": `attachment; filename="${bundle.filename}"`,

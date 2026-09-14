@@ -1,6 +1,6 @@
 {
   "name": "invoice-desk",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A tiny, self-hosted invoicing app for small teams.",
   "private": true,
   "license": "MIT",
@@ -17,7 +17,9 @@
     "invoicing",
     "self-hosted",
     "sqlite",
-    "stripe"
+    "stripe",
+    "gmail",
+    "freshbooks"
   ],
   "type": "module",
   "engines": {
@@ -29,6 +31,7 @@
     "test": "node --test",
     "backup": "node scripts/backup.mjs backup",
     "restore": "node scripts/backup.mjs restore",
-    "backup:smoke": "node scripts/backup.mjs smoke"
+    "backup:smoke": "node scripts/backup.mjs smoke",
+    "import:freshbooks": "node scripts/import-freshbooks.mjs"
   }
 }

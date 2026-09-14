@@ -15,7 +15,7 @@
 }
 body {
   margin: 0;
-  min-width: 320px;
+  min-width: 280px;
   min-height: 100vh;
 }
 button,
@@ -433,6 +433,60 @@ nav button.active {
   border-radius: 12px;
   background: #f5faf6;
 }
+.email-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid #d8e3dc;
+  border-radius: 12px;
+  background: #f7faf8;
+}
+.email-box > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+.email-box span {
+  color: #66726c;
+  font-size: 13px;
+}
+.email-box.provider_accepted {
+  border-color: #9bcdb0;
+  background: #edf8f1;
+}
+.email-box.failed {
+  border-color: #e6b3ae;
+  background: #fdf2f0;
+}
+.email-box details {
+  max-width: 55%;
+}
+.email-box summary {
+  color: #176b4d;
+  font-weight: 750;
+  cursor: pointer;
+}
+.email-box pre {
+  max-height: 260px;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+  border-radius: 8px;
+  background: white;
+}
+.email-connect-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+.stripe-box.preferred {
+  border-width: 2px;
+  border-color: #176b4d;
+  background: #edf8f1;
+}
 .stripe-box > div:first-child,
 .stripe-settings > div:first-child {
   display: grid;
@@ -620,10 +674,14 @@ label small {
 }
 .line-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 110px 150px 34px;
+  grid-template-columns: minmax(210px, 1fr) minmax(230px, 1.3fr) 170px 90px 130px 34px;
   align-items: end;
   gap: 12px;
   margin-bottom: 12px;
+}
+.line-row .service-picker,
+.line-row .description-field {
+  min-width: 0;
 }
 .tax-row {
   display: grid;
@@ -636,6 +694,12 @@ label small {
   display: flex;
   align-items: center;
   gap: 14px;
+  flex-wrap: wrap;
+}
+.invoice-shortcuts {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   flex-wrap: wrap;
 }
 .remove {
@@ -702,6 +766,49 @@ label small {
   border: 1px solid #dfe5e1;
   border-radius: 12px;
   background: white;
+}
+.client-list article > div {
+  min-width: 0;
+  flex: 1;
+}
+.form-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.service-list {
+  display: grid;
+  gap: 20px;
+}
+.service-list section {
+  display: grid;
+  gap: 8px;
+}
+.service-list section > h2 {
+  margin: 0 0 4px;
+  color: #176b4d;
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.service-list article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid #dfe5e1;
+  border-radius: 12px;
+  background: white;
+}
+.service-list h3,
+.service-list p {
+  margin: 0;
+}
+.service-list p {
+  margin-top: 4px;
+  color: #68736d;
+  font-size: 13px;
 }
 .client-list h3,
 .client-list p {
@@ -810,6 +917,20 @@ label small {
   .payment-form {
     grid-template-columns: 1fr 1fr;
   }
+  .email-box {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .email-box details {
+    max-width: none;
+  }
+  .line-row {
+    grid-template-columns: 1fr 1fr;
+  }
+  .line-row .service-picker,
+  .line-row .description-field {
+    grid-column: 1 / -1;
+  }
   .payment-form > b {
     grid-column: 1 / -1;
   }
@@ -826,8 +947,29 @@ label small {
 }
 
 @media (max-width: 600px) {
+  header {
+    padding: 12px;
+  }
+  nav {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  nav button {
+    padding: 0 4px;
+    font-size: 12px;
+  }
   .page {
     width: min(100% - 24px, 1180px);
+  }
+  .steps {
+    display: grid;
+    justify-content: stretch;
+    gap: 9px;
+    overflow: visible;
+    white-space: normal;
+  }
+  .steps span {
+    display: none;
   }
   .hero {
     align-items: stretch;

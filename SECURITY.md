@@ -1,6 +1,6 @@
 # Security policy
 
-Invoice Desk handles business contact and financial records. Treat its data directory, backups, environment variables, and Stripe credentials as sensitive.
+Invoice Desk handles business contact and financial records. Treat its data directory, backups, environment variables, Stripe credentials, Google OAuth credentials, and Gmail authorization as sensitive.
 
 ## Reporting a vulnerability
 
@@ -15,6 +15,8 @@ Invoice Desk is a small self-hosted application, not a multi-tenant SaaS platfor
 - Set unique, long values for `INVOICE_DESK_PASSWORD` and `INVOICE_DESK_SESSION_SECRET`.
 - Set `INVOICE_DESK_SECURE_COOKIES=true` whenever users reach the app over HTTPS.
 - Store secrets in environment variables or a secret manager, never in source control.
+- Use a unique, long `INVOICE_DESK_TOKEN_SECRET` before connecting Gmail; changing it invalidates the encrypted authorization.
+- Give the Google OAuth client only the `gmail.send` scope. Invoice Desk does not need inbox-reading access.
 - Restrict and back up the persistent data directory.
 - Start with Stripe test mode and verify webhook signatures before accepting live payments.
 

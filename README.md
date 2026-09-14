@@ -9,20 +9,27 @@ Invoice Desk started as an internal tool for a small professional-management tea
 
 ## What it does
 
-- Saves reusable clients and business details
+- Saves reusable clients, business details, services, and normal prices
+- Edits client contact details and keeps private notes off invoices
 - Creates CAD and USD invoice drafts
+- Fills invoice lines from the saved service catalogue
+- Calculates percentage-based fees without a spreadsheet
 - Adds Québec GST (5%) and QST (9.975%) or custom tax lines
 - Assigns invoice numbers only when a draft is finalized
 - Freezes finalized invoice data and saves the exact PDF
+- Duplicates an earlier invoice into a new editable draft
 - Tracks partial, final, Stripe, and corrected payments
 - Creates optional Stripe-hosted Checkout links for the exact unpaid balance
+- Sends invoices and PDF attachments through optional send-only Gmail authorization
+- Uses a persistent outbox, safe preview mode, retries, and duplicate-send protection
 - Exports formula-safe invoice and payment CSV files
-- Downloads an accountant ZIP containing PDFs, records, and separate GST/QST totals
+- Downloads a monthly accountant ZIP with PDFs, records, GST/QST totals, and revenue by category
+- Imports authorized FreshBooks client and item exports with duplicate-safe reruns
 - Keeps an audit-friendly history for payment corrections and voided invoices
 
 ## Deliberate limitations
 
-This is not a multi-tenant SaaS platform. One installation represents one business and uses one shared application password. It does not include expense accounting, payroll, bank feeds, automatic email delivery, exchange-rate conversion, or tax filing.
+This is not a multi-tenant SaaS platform. One installation represents one business and uses one shared application password. It does not include expense accounting, payroll, bank feeds, exchange-rate conversion, or tax filing.
 
 ## Quick start
 
@@ -57,11 +64,15 @@ The Compose configuration exposes Invoice Desk only on the host's loopback inter
 | `INVOICE_DESK_DATA_ROOT` | Persistent private database and PDF directory |
 | `INVOICE_DESK_PASSWORD` | Application password; required in production |
 | `INVOICE_DESK_SESSION_SECRET` | Long random session-signing secret; required in production |
+| `INVOICE_DESK_TOKEN_SECRET` | Long secret used to encrypt a connected Gmail refresh token |
 | `INVOICE_DESK_SECURE_COOKIES` | `true` for HTTPS deployments; local Compose defaults to `false` |
 | `STRIPE_SECRET_KEY` | Optional Stripe test or live secret key |
 | `STRIPE_SUCCESS_URL` | Required HTTPS return page when Stripe is enabled |
 | `STRIPE_CANCEL_URL` | Optional HTTPS cancellation page |
 | `STRIPE_WEBHOOK_SECRET` | Optional hosted-deployment webhook signing secret |
+| `GOOGLE_CLIENT_ID` | Optional Google OAuth web-client ID for Gmail sending |
+| `GOOGLE_CLIENT_SECRET` | Optional Google OAuth web-client secret |
+| `GOOGLE_REDIRECT_URI` | Gmail OAuth callback; defaults to the local Invoice Desk callback |
 
 The server refuses to listen beyond the local computer unless an explicit password and session secret are configured.
 
@@ -75,6 +86,18 @@ Never paste Stripe secrets into a client record, invoice, payment instructions, 
 
 The signed webhook endpoint is `POST /api/stripe/webhook`. Keep all other application routes behind authentication.
 
+## Gmail delivery
+
+Without Google credentials, **Review & Send** stays in safe preview mode and transmits nothing. To enable sending:
+
+1. Enable the Gmail API in a Google Cloud project and create an OAuth 2.0 **Web application** client.
+2. Add `http://127.0.0.1:3210/api/gmail/callback` as an authorized redirect URI for local use, or use your deployed HTTPS callback.
+3. On Windows, double-click `Configure Gmail.cmd`; on other platforms, set the Google variables and a long `INVOICE_DESK_TOKEN_SECRET` through your host's secret manager.
+4. Restart Invoice Desk, enter the Gmail or Google Workspace address as the business billing email, and select **Connect Gmail** in Settings.
+5. Approve the single Gmail send scope and test with an address you control before emailing clients.
+
+Invoice Desk cannot read the connected inbox. The Google refresh token is encrypted before SQLite storage. Every installation must use its own Google OAuth application credentials; no credentials are included in this repository.
+
 ## Data and backups
 
 Private state lives in `data/` by default. That directory is ignored by Git and must be stored on a persistent, access-controlled disk.
@@ -87,13 +110,27 @@ node scripts/backup.mjs restore /path/to/backup /empty/restore-folder
 
 Backups include SQLite and issued PDFs. Restore refuses to overwrite a non-empty folder and checks database integrity and PDF completeness.
 
+## FreshBooks import
+
+Back up Invoice Desk, export the authorized client and item CSV files from FreshBooks, then run:
+
+```bash
+npm run import:freshbooks -- "/path/to/FreshBooks export" CAD
+```
+
+Use `USD` instead of `CAD` when appropriate. The importer adds or updates clients and saved services without importing bookkeeping history. Missing client details are preserved for review instead of being silently discarded.
+
 ## Test
 
 ```bash
 node --test
 ```
 
-Tests cover financial rounding, Québec taxes, concurrent invoice numbering, immutable records and PDFs, currency separation, payments and corrections, void-and-reissue, safe exports, accountant ZIPs, exact Stripe amounts, and signed webhooks.
+Tests cover financial rounding, Québec taxes, concurrent invoice numbering, immutable records and PDFs, currency separation, saved services, client editing, invoice duplication, payments and corrections, void-and-reissue, safe exports, monthly accountant ZIPs, Gmail authorization and delivery, exact Stripe amounts, and signed webhooks.
+
+## Email safety
+
+**Review & Send** finalizes a draft only once, saves the exact PDF, and creates one client email record. In preview mode, the message is saved without being transmitted. With Gmail connected, Invoice Desk marks the message as accepted only after Gmail returns a message ID. Failed messages can be retried without assigning another invoice number, while accepted messages are protected from duplicate sends.
 
 ## Security
 

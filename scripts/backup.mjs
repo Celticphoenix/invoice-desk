@@ -26,6 +26,15 @@ function inspect(root) {
   const invoices = Number(
     db.prepare("SELECT COUNT(*) count FROM invoices").get().count,
   );
+  const clients = Number(
+    db.prepare("SELECT COUNT(*) count FROM clients").get().count,
+  );
+  const servicesTable = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='services'")
+    .get();
+  const services = servicesTable
+    ? Number(db.prepare("SELECT COUNT(*) count FROM services").get().count)
+    : 0;
   const issued = Number(
     db
       .prepare("SELECT COUNT(*) count FROM invoices WHERE state != 'draft'")
@@ -43,7 +52,7 @@ function inspect(root) {
     throw new Error(
       `Validation failed: integrity=${integrity}, missing PDFs=${missing.length}`,
     );
-  return { integrity, invoices, issued, pdfs: pdfs.length };
+  return { integrity, clients, services, invoices, issued, pdfs: pdfs.length };
 }
 
 async function createBackup(source, destination) {

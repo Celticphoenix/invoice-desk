@@ -10,12 +10,19 @@ import {
   correctPayment,
   createClient,
   dashboard,
+  duplicateInvoice,
+  emailPayload,
   invoiceCsv,
   issueInvoice,
+  markEmailAccepted,
+  markEmailFailed,
+  queueInvoiceEmail,
   readPdf,
   recordPayment,
   recordStripePayment,
   saveDraft,
+  saveClient,
+  saveService,
   saveSettings,
   saveStripeSession,
   voidAndReissue,
@@ -88,6 +95,8 @@ test("rounds quantities and taxes deterministically", () => {
           description: "A",
           quantity: "1.005",
           rateMinor: 100,
+          category: "Other",
+          serviceId: "",
           amountMinor: 101,
         },
       ],
@@ -111,6 +120,8 @@ test("rounds quantities and taxes deterministically", () => {
           description: "Quebec service",
           quantity: "1",
           rateMinor: 10000,
+          category: "Other",
+          serviceId: "",
           amountMinor: 10000,
         },
       ],
@@ -251,7 +262,72 @@ test("exports formula-safe records", () => {
   assert.match(invoiceCsv(), /"'=SUM\(A1:A2\)"/);
 });
 
-test("builds a year-filtered accountant ZIP with PDFs and separate Quebec taxes", () => {
+test("saves reusable services, edits imported clients and duplicates invoices", () => {
+  const service = saveService({
+    name: "Pre-fight medical",
+    description: "Pre-fight medical coordination",
+    category: "Services",
+    currency: "CAD",
+    rateMinor: 27500,
+  });
+  assert.equal(dashboard().services[0].name, "Pre-fight medical");
+  saveClient(
+    {
+      name: "Updated Client",
+      email: "",
+      company: "Example Company",
+      phone: "514-555-0100",
+      address: "Montreal, QC",
+      notes: "Imported and reviewed",
+    },
+    clientId,
+  );
+  const original = issueInvoice(
+    saveDraft({
+      ...draft(clientId),
+      lines: [
+        {
+          serviceId: service.id,
+          description: service.description,
+          category: service.category,
+          quantity: "1",
+          rateMinor: service.rateMinor,
+        },
+      ],
+    }).id,
+  );
+  const copy = duplicateInvoice(original.id);
+  assert.equal(copy.state, "draft");
+  assert.equal(copy.clientId, original.clientId);
+  assert.equal(copy.lines[0].category, "Services");
+  assert.equal(dashboard().clients[0].phone, "514-555-0100");
+});
+
+test("keeps a persistent duplicate-safe invoice email outbox", () => {
+  const invoice = issueInvoice(saveDraft(draft(clientId)).id);
+  const preview = queueInvoiceEmail(invoice.id, "preview");
+  assert.equal(preview.status, "preview");
+  assert.equal(preview.recipientEmail, "client@example.test");
+  assert.match(preview.bodyText, new RegExp(invoice.invoiceNumber));
+  assert.equal(
+    emailPayload(preview.id).pdf.bytes.subarray(0, 4).toString(),
+    "%PDF",
+  );
+  const failed = markEmailFailed(preview.id, "Fictional provider failure");
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.attemptCount, 1);
+  const retried = queueInvoiceEmail(invoice.id, "queued");
+  assert.equal(retried.id, preview.id);
+  const accepted = markEmailAccepted(retried.id, "gmail-message-test");
+  assert.equal(accepted.status, "provider_accepted");
+  assert.equal(
+    queueInvoiceEmail(invoice.id, "queued").status,
+    "provider_accepted",
+  );
+  assert.equal(dashboard().emailOutbox.length, 1);
+});
+
+test("builds a period-filtered accountant ZIP with PDFs and separate Quebec taxes", () => {
   saveSettings({
     ...dashboard().settings,
     gstNumber: "123456789RT0001",
@@ -293,6 +369,7 @@ test("builds a year-filtered accountant ZIP with PDFs and separate Quebec taxes"
     "README.txt",
     "invoice-records.csv",
     "payment-records.csv",
+    "revenue-by-category.csv",
     `invoices/${current.invoiceNumber}.pdf`,
   ]);
   assert.match(entries.get("README.txt").toString(), /GST: CAD 3\.75/);
@@ -300,7 +377,9 @@ test("builds a year-filtered accountant ZIP with PDFs and separate Quebec taxes"
   assert.match(entries.get("invoice-records.csv").toString(), /"gst","qst","other_tax"/);
   assert.match(entries.get("invoice-records.csv").toString(), /"3\.75","7\.48"/);
   assert.match(entries.get("payment-records.csv").toString(), /BANK-ACCOUNTANT-TEST/);
+  assert.match(entries.get("revenue-by-category.csv").toString(), /Other/);
   assert.equal(entries.has(`invoices/${older.invoiceNumber}.pdf`), false);
+  assert.equal(accountantPackage("2026-09").invoiceCount, 1);
   assert.equal(accountantPackage().invoiceCount, 2);
-  assert.throws(() => accountantPackage("twenty"), /four-digit year/);
+  assert.throws(() => accountantPackage("twenty"), /valid month or year/);
 });

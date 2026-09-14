@@ -3,6 +3,16 @@ let data = null;
 let view = "invoices";
 let notice = "";
 let editor = null;
+let clientEditorId = null;
+let serviceEditorId = null;
+
+const revenueCategories = [
+  "Services",
+  "Products",
+  "Consulting",
+  "Commission",
+  "Other",
+];
 
 const today = new Date().toISOString().slice(0, 10);
 const dueDefault = new Date(Date.now() + 30 * 86400000)
@@ -28,6 +38,22 @@ function minor(value) {
   if (!/^\d+(?:\.\d{0,2})?$/.test(String(value).trim())) return -1;
   const [whole, cents = ""] = String(value).trim().split(".");
   return Number(whole) * 100 + Number(cents.padEnd(2, "0"));
+}
+
+function categoryOptions(selected) {
+  return revenueCategories
+    .map(
+      (category) =>
+        `<option ${category === selected ? "selected" : ""}>${escapeHtml(category)}</option>`,
+    )
+    .join("");
+}
+
+function paymentMethod(method) {
+  if (method === "bank_transfer") return "Interac e-Transfer";
+  if (method === "paypal") return "PayPal";
+  if (method === "stripe") return "Stripe";
+  return "Other";
 }
 
 async function request(url, options) {
@@ -75,11 +101,13 @@ function loginScreen(error = "") {
 }
 
 function shell(content) {
-  app.innerHTML = `<header><button class="brand" data-view="invoices"><span class="brand-mark">N</span><span><b>Invoice Desk</b><small>Private &amp; internal</small></span></button><nav><button data-view="invoices" class="${view === "invoices" ? "active" : ""}">Invoices</button><button data-view="clients" class="${view === "clients" ? "active" : ""}">Clients</button><button data-view="settings" class="${view === "settings" ? "active" : ""}">Settings</button></nav><button class="signout" id="signout">Sign out</button></header>${notice ? `<div class="toast">${escapeHtml(notice)}</div>` : ""}<main class="page">${content}</main>`;
+  app.innerHTML = `<header><button class="brand" data-view="invoices"><span class="brand-mark">N</span><span><b>Invoice Desk</b><small>Private &amp; internal</small></span></button><nav><button data-view="invoices" class="${view === "invoices" ? "active" : ""}">Invoices</button><button data-view="services" class="${view === "services" ? "active" : ""}">Services &amp; prices</button><button data-view="clients" class="${view === "clients" ? "active" : ""}">Clients</button><button data-view="settings" class="${view === "settings" ? "active" : ""}">Settings</button></nav><button class="signout" id="signout">Sign out</button></header>${notice ? `<div class="toast">${escapeHtml(notice)}</div>` : ""}<main class="page">${content}</main>`;
   document.querySelectorAll("[data-view]").forEach((button) =>
     button.addEventListener("click", () => {
       view = button.dataset.view;
       editor = null;
+      clientEditorId = null;
+      serviceEditorId = null;
       notice = "";
       render();
     }),
@@ -110,18 +138,20 @@ function invoicesScreen() {
   const usd = issued
     .filter((invoice) => invoice.currency === "USD")
     .reduce((sum, invoice) => sum + invoice.balanceMinor, 0);
-  const accountantYears = [
+  const currentMonth = today.slice(0, 7);
+  const accountantMonths = [
     ...new Set(
       [
+        currentMonth,
         ...data.invoices
           .filter((invoice) => invoice.state !== "draft")
-          .map((invoice) => invoice.issueDate.slice(0, 4)),
-        ...data.payments.map((payment) => payment.paymentDate.slice(0, 4)),
+          .map((invoice) => invoice.issueDate.slice(0, 7)),
+        ...data.payments.map((payment) => payment.paymentDate.slice(0, 7)),
       ].filter(Boolean),
     ),
   ].sort((left, right) => right.localeCompare(left));
   shell(
-    `<section class="hero"><div><p class="kicker">Your invoicing workspace</p><h1>Invoices, without the fuss.</h1><p>Create a draft, check it, issue it, then record what was paid.</p></div><button class="primary large" id="new-invoice">${hasClients ? "+ Create invoice" : "+ Add your first client"}</button></section><section class="steps"><b>1. Pick a client</b><span>→</span><b>2. Make a draft</b><span>→</span><b>3. Review and issue</b><span>→</span><b>4. Record payment</b></section><section class="summary"><article><small>Drafts to finish</small><strong>${data.invoices.filter((invoice) => invoice.state === "draft").length}</strong><span>Drafts have no invoice number yet.</span></article><article><small>CAD still to collect</small><strong>${money(cad, "CAD")}</strong><span>CAD stays separate.</span></article><article><small>USD still to collect</small><strong>${money(usd, "USD")}</strong><span>USD stays separate.</span></article></section><section class="accountant-package"><div><p class="kicker">Easy accountant handoff</p><h2>Everything in one download</h2><p>Finalized PDFs plus invoice and payment spreadsheets. Drafts stay private.</p></div><label>Period<select id="accountant-period"><option value="">All records</option>${accountantYears.map((year) => `<option value="${year}">${year}</option>`).join("")}</select></label><a class="primary large" id="accountant-package" href="/api/export/accountant-package">Download accountant package</a></section><section class="panel"><div class="panel-title"><div><p class="kicker">All records</p><h2>Invoices</h2></div><div class="actions"><label class="search">Search <input id="search" placeholder="Client or invoice number" /></label><a class="secondary" href="/api/export/invoices">Invoice CSV</a><a class="secondary" href="/api/export/payments">Payment CSV</a></div></div><div id="invoice-list">${invoiceCards(data.invoices)}</div></section>${paymentHistory()}`,
+    `<section class="hero"><div><p class="kicker">Your invoicing workspace</p><h1>Invoice someone in four simple steps.</h1><p>Create a draft, send it, and keep clear records in one simple workspace.</p></div><button class="primary large" id="new-invoice">${hasClients ? "+ Create invoice" : "+ Add your first client"}</button></section><section class="steps"><b>1. Pick a client</b><span>→</span><b>2. Choose the service</b><span>→</span><b>3. Review and issue</b><span>→</span><b>4. Get paid</b></section><section class="summary"><article><small>Drafts to finish</small><strong>${data.invoices.filter((invoice) => invoice.state === "draft").length}</strong><span>Drafts have no invoice number yet.</span></article><article><small>CAD still to collect</small><strong>${money(cad, "CAD")}</strong><span>CAD stays separate.</span></article><article><small>USD still to collect</small><strong>${money(usd, "USD")}</strong><span>USD stays separate.</span></article></section><section class="accountant-package"><div><p class="kicker">Once-a-month accountant report</p><h2>Pick the month. Download one file.</h2><p>Includes invoice PDFs, invoice and payment spreadsheets, GST/QST totals, and revenue split by service category.</p></div><label>Report month<select id="accountant-period">${accountantMonths.map((month) => `<option value="${month}" ${month === currentMonth ? "selected" : ""}>${new Date(`${month}-02T12:00:00`).toLocaleDateString("en-CA", { month: "long", year: "numeric" })}</option>`).join("")}<option value="">All records</option></select></label><a class="primary large" id="accountant-package" href="/api/export/accountant-package?period=${currentMonth}">Download monthly report</a></section><section class="panel"><div class="panel-title"><div><p class="kicker">All records</p><h2>Invoices</h2></div><div class="actions"><label class="search">Search <input id="search" placeholder="Client or invoice number" /></label><a class="secondary" href="/api/export/invoices">Invoice CSV</a><a class="secondary" href="/api/export/payments">Payment CSV</a></div></div><div id="invoice-list">${invoiceCards(data.invoices)}</div></section>${paymentHistory()}`,
   );
   document.querySelector("#new-invoice").addEventListener("click", () => {
     if (hasClients) return openEditor();
@@ -144,7 +174,7 @@ function invoicesScreen() {
     .addEventListener("change", (event) => {
       const year = event.target.value;
       document.querySelector("#accountant-package").href = year
-        ? `/api/export/accountant-package?year=${encodeURIComponent(year)}`
+        ? `/api/export/accountant-package?period=${encodeURIComponent(year)}`
         : "/api/export/accountant-package";
     });
   bindInvoiceActions();
@@ -157,28 +187,38 @@ function invoiceCards(invoices) {
   return invoices
     .map((invoice) => {
       const [label, kind] = status(invoice);
+      const emailRecord = data.emailOutbox?.find(
+        (item) =>
+          item.invoiceId === invoice.id && item.recipientType === "client",
+      );
+      const sendLabel = data.email?.connected
+        ? "Review & send invoice"
+        : "Finalize & preview email";
       const draftActions =
         invoice.state === "draft"
-          ? `<button class="secondary" data-edit="${invoice.id}">Edit draft</button><button class="primary" data-issue="${invoice.id}">Finalize &amp; create PDF</button>`
-          : `<a class="secondary" href="/api/pdf/${invoice.id}">Download PDF</a>`;
+          ? `<button class="secondary" data-edit="${invoice.id}">Edit draft</button><button class="secondary" data-issue="${invoice.id}">Finalize PDF only</button><button class="primary" data-review-send="${invoice.id}">${sendLabel}</button>`
+          : `<a class="secondary" href="/api/pdf/${invoice.id}">Download PDF</a><button class="secondary" data-duplicate="${invoice.id}">Make another like this</button>${emailRecord?.status === "provider_accepted" ? "" : `<button class="primary" data-review-send="${invoice.id}">${sendLabel}</button>`}`;
       const voidAction =
         invoice.state === "issued" && invoice.paymentsMinor === 0
           ? `<button class="danger-link" data-void="${invoice.id}">Void and make replacement</button>`
           : "";
       const payment =
         invoice.state === "issued" && invoice.balanceMinor > 0
-          ? `<form class="payment-form" data-payment="${invoice.id}"><b>Record a payment</b><label>Amount<input name="amount" inputmode="decimal" placeholder="0.00" required /></label><label>How paid<select name="method"><option value="bank_transfer">Bank transfer</option><option value="paypal">PayPal</option><option value="other">Other</option></select></label><label>Reference<input name="reference" placeholder="Optional" /></label><button class="primary">Save payment</button></form>`
+          ? `<form class="payment-form" data-payment="${invoice.id}"><b>Paid another way?</b><label>Amount<input name="amount" inputmode="decimal" placeholder="0.00" required /></label><label>How paid<select name="method"><option value="bank_transfer">Interac e-Transfer</option><option value="paypal">PayPal</option><option value="other">Other</option></select></label><label>Confirmation or reference<input name="reference" placeholder="Optional" /></label><button class="primary">Record payment</button></form>`
           : "";
       const checkout = invoice.stripeCheckout;
       const stripeControls =
         invoice.state === "issued" && invoice.balanceMinor > 0
           ? checkout?.status === "open"
-            ? `<div class="stripe-box"><div><b>Stripe payment link ready</b><span>${checkout.livemode ? "LIVE payment" : "TEST payment"} · ${money(checkout.amountMinor, checkout.currency)}</span></div><div class="invoice-buttons"><a class="primary" href="${escapeHtml(checkout.url)}" target="_blank" rel="noreferrer">Open payment page</a><button class="secondary" data-copy-stripe="${escapeHtml(checkout.url)}">Copy link</button><button class="text-button" data-stripe-sync>Check payment status</button></div></div>`
+            ? `<div class="stripe-box preferred"><div><b>Preferred: pay securely with Stripe</b><span>${checkout.livemode ? "LIVE payment" : "TEST payment"} · ${money(checkout.amountMinor, checkout.currency)}</span></div><div class="invoice-buttons"><a class="primary" href="${escapeHtml(checkout.url)}" target="_blank" rel="noreferrer">Open Stripe payment page</a><button class="secondary" data-copy-stripe="${escapeHtml(checkout.url)}">Copy Stripe link</button><button class="text-button" data-stripe-sync>Check payment status</button></div></div>`
             : data.stripe?.enabled
-              ? `<div class="stripe-box"><div><b>Accept card payment</b><span>${data.stripe.mode === "test" ? "TEST MODE - no real charge" : "Creates a secure link for the exact balance"}</span></div><button class="primary" data-stripe-create="${invoice.id}">Create Stripe payment link</button></div>`
+              ? `<div class="stripe-box preferred"><div><b>Preferred: pay securely with Stripe</b><span>${data.stripe.mode === "test" ? "TEST MODE - no real charge" : "Creates a secure link for the exact balance"}</span></div><button class="primary" data-stripe-create="${invoice.id}">Create Stripe payment link</button></div>`
               : `<div class="stripe-box"><div><b>Stripe is not connected</b><span>Configure it once, then create exact payment links here.</span></div><button class="secondary" data-stripe-settings>Stripe setup</button></div>`
           : "";
-      return `<article class="invoice-card"><div class="invoice-main"><div><span class="badge ${kind}">${label}</span><h3>${escapeHtml(invoice.invoiceNumber ?? "Unnumbered draft")}</h3><p>${escapeHtml(invoice.clientName)} · Due ${escapeHtml(invoice.dueDate)}</p></div><div class="amount"><strong>${money(invoice.totalMinor, invoice.currency)}</strong><span>${invoice.state === "issued" ? `${money(invoice.balanceMinor, invoice.currency)} remaining` : invoice.currency}</span></div></div><div class="invoice-buttons">${draftActions}${voidAction}</div>${stripeControls}${payment}${invoice.voidReason ? `<p class="void-note">Reason: ${escapeHtml(invoice.voidReason)}</p>` : ""}</article>`;
+      const emailStatus = emailRecord
+        ? `<div class="email-box ${emailRecord.status}"><div><b>${emailRecord.status === "provider_accepted" ? "Gmail accepted this email" : emailRecord.status === "failed" ? "Email needs attention" : "Email preview ready"}</b><span>To ${escapeHtml(emailRecord.recipientEmail)}${emailRecord.acceptedAt ? ` · ${escapeHtml(emailRecord.acceptedAt.slice(0, 10))}` : ""}</span></div>${emailRecord.status === "failed" ? `<button class="primary" data-retry-email="${emailRecord.id}">Retry email</button>` : emailRecord.status === "preview" ? `<details><summary>Read preview</summary><pre>${escapeHtml(emailRecord.bodyText)}</pre></details>` : ""}</div>`
+        : "";
+      return `<article class="invoice-card"><div class="invoice-main"><div><span class="badge ${kind}">${label}</span><h3>${escapeHtml(invoice.invoiceNumber ?? "Unnumbered draft")}</h3><p>${escapeHtml(invoice.clientName)} · Due ${escapeHtml(invoice.dueDate)}</p></div><div class="amount"><strong>${money(invoice.totalMinor, invoice.currency)}</strong><span>${invoice.state === "issued" ? `${money(invoice.balanceMinor, invoice.currency)} remaining` : invoice.currency}</span></div></div><div class="invoice-buttons">${draftActions}${voidAction}</div>${emailStatus}${stripeControls}${payment}${invoice.voidReason ? `<p class="void-note">Reason: ${escapeHtml(invoice.voidReason)}</p>` : ""}</article>`;
     })
     .join("");
 }
@@ -205,6 +245,38 @@ function bindInvoiceActions() {
           "Invoice issued and its PDF saved.",
         );
     }),
+  );
+  document.querySelectorAll("[data-duplicate]").forEach((button) =>
+    button.addEventListener("click", () =>
+      action(
+        { action: "duplicate", invoiceId: button.dataset.duplicate },
+        "A new draft was created with the same client and services.",
+      ),
+    ),
+  );
+  document.querySelectorAll("[data-review-send]").forEach((button) =>
+    button.addEventListener("click", () => {
+      const message = data.email?.connected
+        ? "Finalize this invoice and send it from the connected Gmail account?"
+        : "Finalize this invoice and create a safe email preview? Nothing will be sent.";
+      if (confirm(message))
+        action(
+          { action: "review-send", invoiceId: button.dataset.reviewSend },
+          data.email?.connected
+            ? "Gmail accepted the invoice email."
+            : "Email preview created. Nothing was sent.",
+        );
+    }),
+  );
+  document.querySelectorAll("[data-retry-email]").forEach((button) =>
+    button.addEventListener("click", () =>
+      action(
+        { action: "retry-email", outboxId: button.dataset.retryEmail },
+        data.email?.connected
+          ? "Email retry accepted by Gmail."
+          : "Preview refreshed. Connect Gmail before sending.",
+      ),
+    ),
   );
   document.querySelectorAll("[data-void]").forEach((button) =>
     button.addEventListener("click", () => {
@@ -282,7 +354,7 @@ function bindInvoiceActions() {
 
 function paymentHistory() {
   if (!data.payments.length) return "";
-  return `<section class="panel"><div class="panel-title"><div><p class="kicker">Audit-friendly</p><h2>Payment history</h2></div><p>Gross customer payments. Fees are never guessed.</p></div><div class="payment-history">${data.payments.map((payment) => `<div class="${payment.status === "corrected" ? "corrected" : ""}"><b>${escapeHtml(payment.invoiceNumber)}</b><span>${escapeHtml(payment.paymentDate)}<small>${escapeHtml(payment.method.replace("_", " "))}</small></span><span>${escapeHtml(payment.reference || "No reference")}</span><b>${money(payment.amountMinor, payment.currency)}</b>${payment.status === "active" ? `<button class="text-button" data-correct="${payment.id}">Correct</button>` : `<em>Corrected</em>`}</div>`).join("")}</div></section>`;
+  return `<section class="panel"><div class="panel-title"><div><p class="kicker">Audit-friendly</p><h2>Payment history</h2></div><p>Gross customer payments. Fees are never guessed.</p></div><div class="payment-history">${data.payments.map((payment) => `<div class="${payment.status === "corrected" ? "corrected" : ""}"><b>${escapeHtml(payment.invoiceNumber)}</b><span>${escapeHtml(payment.paymentDate)}<small>${escapeHtml(paymentMethod(payment.method))}</small></span><span>${escapeHtml(payment.reference || "No reference")}</span><b>${money(payment.amountMinor, payment.currency)}</b>${payment.status === "active" ? `<button class="text-button" data-correct="${payment.id}">Correct</button>` : `<em>Corrected</em>`}</div>`).join("")}</div></section>`;
 }
 
 function bindCorrections() {
@@ -325,11 +397,15 @@ function openEditor(invoice = null) {
         dueDate: invoice.dueDate,
         terms: invoice.terms,
         notes: invoice.notes,
-        lines: invoice.lines.map(({ description, quantity, rateMinor }) => ({
+        lines: invoice.lines.map(
+          ({ description, quantity, rateMinor, category, serviceId }) => ({
           description,
           quantity,
           rateMinor,
-        })),
+            category: category ?? "Other",
+            serviceId: serviceId ?? "",
+          }),
+        ),
         taxes: invoice.taxes.map(
           ({ label, rateThousandths, rateBasisPoints }) => ({
             label,
@@ -347,9 +423,11 @@ function openEditor(invoice = null) {
         notes: "Thank you for your business.",
         lines: [
           {
-            description: "Professional management services",
+            description: "",
             quantity: "1",
             rateMinor: 0,
+            category: "Other",
+            serviceId: "",
           },
         ],
         taxes: [],
@@ -374,7 +452,7 @@ function editorTotals() {
 function renderEditor() {
   const totals = editorTotals();
   shell(
-    `<section class="composer"><div class="composer-title"><div><p class="kicker">Draft - nothing is sent</p><h1>${editor.id ? "Edit your draft" : "Create an invoice"}</h1><p>Complete four short sections, then save and review.</p></div><div class="total-box"><small>Invoice total</small><strong id="live-total">${money(totals.total, editor.currency)}</strong></div></div><form id="invoice-form"><section class="form-section"><span class="number">1</span><div><h2>Who is this for?</h2><div class="grid"><label class="wide">Client<select name="clientId">${data.clients.map((client) => `<option value="${client.id}" ${client.id === editor.clientId ? "selected" : ""}>${escapeHtml(client.name)}${client.company ? ` - ${escapeHtml(client.company)}` : ""}</option>`).join("")}</select></label><label>Currency<select name="currency"><option ${editor.currency === "CAD" ? "selected" : ""}>CAD</option><option ${editor.currency === "USD" ? "selected" : ""}>USD</option></select><small>Never combined or converted.</small></label><label>Invoice date<input name="issueDate" type="date" value="${editor.issueDate}" required /></label><label>Payment due<input name="dueDate" type="date" value="${editor.dueDate}" required /></label></div></div></section><section class="form-section"><span class="number">2</span><div><h2>What are you billing for?</h2><div id="lines">${editor.lines.map((line, index) => `<div class="line-row"><label>Service description<input data-line="${index}" data-field="description" value="${escapeHtml(line.description)}" required /></label><label>Quantity<input data-line="${index}" data-field="quantity" value="${escapeHtml(line.quantity)}" inputmode="decimal" required /></label><label>Rate (${editor.currency})<input data-line="${index}" data-field="rate" value="${(line.rateMinor / 100).toFixed(2)}" inputmode="decimal" required /></label>${editor.lines.length > 1 ? `<button type="button" class="remove" data-remove-line="${index}" aria-label="Remove service">×</button>` : ""}</div>`).join("")}</div><button type="button" class="text-button" id="add-line">+ Add another service</button></div></section><section class="form-section"><span class="number">3</span><div><h2>Québec sales taxes</h2><p class="helper">GST is 5% and QST is 9.975%, both calculated on the pre-tax subtotal. Add them only if you are registered and this invoice is taxable.</p><div id="taxes">${editor.taxes.map((tax, index) => `<div class="tax-row"><label>Tax label<input data-tax="${index}" data-field="label" value="${escapeHtml(tax.label)}" required /></label><label>Rate %<input data-tax="${index}" data-field="rate" type="number" min="0" max="100" step="0.001" value="${(tax.rateThousandths / 1000).toFixed(3).replace(/\.?0+$/, "")}" required /></label><button type="button" class="remove" data-remove-tax="${index}" aria-label="Remove tax">×</button></div>`).join("")}</div><div class="tax-actions"><button type="button" class="primary" id="add-quebec-tax">+ Add Québec GST + QST</button><button type="button" class="text-button" id="add-tax">+ Custom tax</button></div></div></section><section class="form-section"><span class="number">4</span><div><h2>Final notes</h2><div class="grid"><label>Payment terms<textarea name="terms">${escapeHtml(editor.terms)}</textarea></label><label>Note on invoice<textarea name="notes">${escapeHtml(editor.notes)}</textarea></label></div></div></section><footer class="form-footer"><button type="button" class="secondary" id="cancel-editor">Cancel</button><span>This only saves a draft.</span><button class="primary large">Save draft →</button></footer></form></section>`,
+    `<section class="composer"><div class="composer-title"><div><p class="kicker">Draft - nothing is sent</p><h1>${editor.id ? "Edit your draft" : "Create an invoice"}</h1><p>Complete four short sections, then save and review.</p></div><div class="total-box"><small>Invoice total</small><strong id="live-total">${money(totals.total, editor.currency)}</strong></div></div><form id="invoice-form"><section class="form-section"><span class="number">1</span><div><h2>Who is this for?</h2><div class="grid"><label class="wide">Client<select name="clientId">${data.clients.map((client) => `<option value="${client.id}" ${client.id === editor.clientId ? "selected" : ""}>${escapeHtml(client.name)}${client.company ? ` - ${escapeHtml(client.company)}` : ""}</option>`).join("")}</select></label><label>Currency<select name="currency"><option ${editor.currency === "CAD" ? "selected" : ""}>CAD</option><option ${editor.currency === "USD" ? "selected" : ""}>USD</option></select><small>Never combined or converted.</small></label><label>Invoice date<input name="issueDate" type="date" value="${editor.issueDate}" required /></label><label>Payment due<input name="dueDate" type="date" value="${editor.dueDate}" required /></label></div></div></section><section class="form-section"><span class="number">2</span><div><h2>What are you billing for?</h2><p class="helper">Choose a saved service to fill in its normal description and price. You can still change anything on this invoice.</p><div id="lines">${editor.lines.map((line, index) => `<div class="line-row"><label class="service-picker">Saved service<select data-line="${index}" data-field="serviceId"><option value="">Choose a service…</option>${data.services.filter((service) => service.currency === editor.currency).map((service) => `<option value="${service.id}" ${service.id === line.serviceId ? "selected" : ""}>${escapeHtml(service.name)} — ${money(service.rateMinor, service.currency)}</option>`).join("")}</select></label><label class="description-field">Description on invoice<input data-line="${index}" data-field="description" value="${escapeHtml(line.description)}" required /></label><label>Revenue type<select data-line="${index}" data-field="category">${categoryOptions(line.category ?? "Other")}</select></label><label>Quantity<input data-line="${index}" data-field="quantity" value="${escapeHtml(line.quantity)}" inputmode="decimal" required /></label><label>Rate (${editor.currency})<input data-line="${index}" data-field="rate" value="${(line.rateMinor / 100).toFixed(2)}" inputmode="decimal" required /></label>${editor.lines.length > 1 ? `<button type="button" class="remove" data-remove-line="${index}" aria-label="Remove service">×</button>` : ""}</div>`).join("")}</div><div class="invoice-shortcuts"><button type="button" class="text-button" id="add-line">+ Add another service</button><button type="button" class="secondary" data-add-percentage="Commission">Calculate percentage fee</button></div></div></section><section class="form-section"><span class="number">3</span><div><h2>Is this invoice taxable in Québec?</h2><p class="helper">Choose the green button for the normal Québec GST and QST. Leave this section empty for a non-taxable invoice.</p><div id="taxes">${editor.taxes.map((tax, index) => `<div class="tax-row"><label>Tax label<input data-tax="${index}" data-field="label" value="${escapeHtml(tax.label)}" required /></label><label>Rate %<input data-tax="${index}" data-field="rate" type="number" min="0" max="100" step="0.001" value="${(tax.rateThousandths / 1000).toFixed(3).replace(/\.?0+$/, "")}" required /></label><button type="button" class="remove" data-remove-tax="${index}" aria-label="Remove tax">×</button></div>`).join("")}</div><div class="tax-actions"><button type="button" class="primary" id="add-quebec-tax">Yes — add GST + QST</button><button type="button" class="text-button" id="add-tax">Add a different tax</button></div></div></section><section class="form-section"><span class="number">4</span><div><h2>Final notes</h2><div class="grid"><label>Payment terms<textarea name="terms">${escapeHtml(editor.terms)}</textarea></label><label>Note on invoice<textarea name="notes">${escapeHtml(editor.notes)}</textarea></label></div></div></section><footer class="form-footer"><button type="button" class="secondary" id="cancel-editor">Cancel</button><span>This only saves a draft. Nothing is sent.</span><button class="primary large">Save draft and review →</button></footer></form></section>`,
   );
   bindEditor();
 }
@@ -385,7 +463,19 @@ function bindEditor() {
     const target = event.target;
     if (target.dataset.line !== undefined) {
       const line = editor.lines[Number(target.dataset.line)];
-      if (target.dataset.field === "rate")
+      if (target.dataset.field === "serviceId") {
+        const service = data.services.find(
+          (item) => item.id === target.value,
+        );
+        line.serviceId = target.value;
+        if (service) {
+          line.description = service.description;
+          line.rateMinor = service.rateMinor;
+          line.category = service.category;
+        }
+        renderEditor();
+        return;
+      } else if (target.dataset.field === "rate")
         line.rateMinor = Math.max(0, minor(target.value));
       else line[target.dataset.field] = target.value;
     }
@@ -429,9 +519,50 @@ function bindEditor() {
     render();
   });
   document.querySelector("#add-line").addEventListener("click", () => {
-    editor.lines.push({ description: "", quantity: "1", rateMinor: 0 });
+    editor.lines.push({
+      description: "",
+      quantity: "1",
+      rateMinor: 0,
+      category: "Other",
+      serviceId: "",
+    });
     renderEditor();
   });
+  document.querySelectorAll("[data-add-percentage]").forEach((button) =>
+    button.addEventListener("click", () => {
+      const base = prompt(
+        "Enter the amount the percentage is based on",
+        "0.00",
+      );
+      if (base === null || minor(base) < 0)
+        return alert("Enter a valid total amount.");
+      const percent = prompt("Enter the percentage fee", "10");
+      if (
+        percent === null ||
+        !/^\d+(?:\.\d{1,3})?$/.test(percent.trim()) ||
+        Number(percent) > 100
+      )
+        return alert("Enter a valid percentage from 0 to 100.");
+      const amountMinor = Math.round((minor(base) * Number(percent)) / 100);
+      const category = "Commission";
+      const description = `Percentage fee (${percent.trim()}%)`;
+      const line = {
+        description,
+        quantity: "1",
+        rateMinor: amountMinor,
+        category,
+        serviceId: "",
+      };
+      if (
+        editor.lines.length === 1 &&
+        !editor.lines[0].description &&
+        editor.lines[0].rateMinor === 0
+      )
+        editor.lines[0] = line;
+      else editor.lines.push(line);
+      renderEditor();
+    }),
+  );
   document.querySelector("#add-tax").addEventListener("click", () => {
     editor.taxes.push({ label: "Tax", rateThousandths: 0 });
     renderEditor();
@@ -459,27 +590,82 @@ function bindEditor() {
 }
 
 function clientsScreen() {
+  const editing = data.clients.find((client) => client.id === clientEditorId);
   shell(
-    `<section class="simple"><p class="kicker">Saved address book</p><h1>Clients</h1><p>Add a client once, then choose them on future invoices.</p><div class="two-column"><form class="card-form" id="client-form"><h2>Add a client</h2><label>Name<input name="name" required /></label><label>Email<input name="email" type="email" required /></label><label>Company <small>optional</small><input name="company" /></label><label>Billing address<textarea name="address"></textarea></label><button class="primary">+ Save client</button></form><div class="client-list">${data.clients.map((client) => `<article><span class="avatar">${escapeHtml(client.name[0])}</span><div><h3>${escapeHtml(client.name)}</h3><p>${escapeHtml(client.company || "Individual")}</p><small>${escapeHtml(client.email)}</small></div></article>`).join("")}</div></div></section>`,
+    `<section class="simple"><p class="kicker">Saved address book · ${data.clients.length} clients</p><h1>Clients</h1><p>Add a client once, then choose them on every future invoice.</p><div class="two-column"><form class="card-form" id="client-form"><h2>${editing ? "Edit client" : "Add a client"}</h2><label>Name<input name="name" value="${escapeHtml(editing?.name ?? "")}" required /></label><label>Email <small>optional until you need to send an invoice</small><input name="email" type="email" value="${escapeHtml(editing?.email ?? "")}" /></label><label>Company <small>optional</small><input name="company" value="${escapeHtml(editing?.company ?? "")}" /></label><label>Phone <small>optional</small><input name="phone" value="${escapeHtml(editing?.phone ?? "")}" /></label><label>Billing address<textarea name="address">${escapeHtml(editing?.address ?? "")}</textarea></label><label>Private notes <small>never shown on invoices</small><textarea name="notes">${escapeHtml(editing?.notes ?? "")}</textarea></label><div class="form-buttons">${editing ? `<button type="button" class="secondary" id="cancel-client-edit">Cancel</button>` : ""}<button class="primary">${editing ? "Save changes" : "+ Save client"}</button></div></form><div class="client-list">${data.clients.map((client) => `<article><span class="avatar">${escapeHtml(client.name[0])}</span><div><h3>${escapeHtml(client.name)}</h3><p>${escapeHtml(client.company || "Individual")}</p><small>${escapeHtml(client.email || "Email not added yet")}${client.phone ? ` · ${escapeHtml(client.phone)}` : ""}</small></div><button class="secondary" data-edit-client="${client.id}">Edit</button></article>`).join("")}</div></div></section>`,
   );
   document.querySelector("#client-form").addEventListener("submit", (event) => {
     event.preventDefault();
     action(
       {
-        action: "create-client",
+        action: editing ? "save-client" : "create-client",
+        clientId: editing?.id,
         client: Object.fromEntries(new FormData(event.currentTarget)),
       },
-      "Client saved and ready to invoice.",
+      editing ? "Client details updated." : "Client saved and ready to invoice.",
     );
+    clientEditorId = null;
+  });
+  document.querySelectorAll("[data-edit-client]").forEach((button) =>
+    button.addEventListener("click", () => {
+      clientEditorId = button.dataset.editClient;
+      render();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }),
+  );
+  document.querySelector("#cancel-client-edit")?.addEventListener("click", () => {
+    clientEditorId = null;
+    render();
+  });
+}
+
+function servicesScreen() {
+  const editing = data.services.find((service) => service.id === serviceEditorId);
+  shell(
+    `<section class="simple"><p class="kicker">Saved menu · ${data.services.length} services</p><h1>Services &amp; prices</h1><p>Save a service once. Choosing it on an invoice fills in the normal description, category, and price automatically.</p><div class="two-column"><form class="card-form" id="service-form"><h2>${editing ? "Edit service" : "Add a service"}</h2><label>Short service name<input name="name" value="${escapeHtml(editing?.name ?? "")}" placeholder="Example: Consulting session" required /></label><label>Description shown on invoice<textarea name="description" required>${escapeHtml(editing?.description ?? "")}</textarea></label><label>Revenue type<select name="category">${categoryOptions(editing?.category ?? "Services")}</select></label><div class="grid"><label>Currency<select name="currency"><option ${editing?.currency !== "USD" ? "selected" : ""}>CAD</option><option ${editing?.currency === "USD" ? "selected" : ""}>USD</option></select></label><label>Normal price<input name="rate" inputmode="decimal" value="${editing ? (editing.rateMinor / 100).toFixed(2) : ""}" placeholder="0.00" required /></label></div><div class="form-buttons">${editing ? `<button type="button" class="secondary" id="cancel-service-edit">Cancel</button>` : ""}<button class="primary">${editing ? "Save changes" : "+ Save service"}</button></div></form><div class="service-list">${revenueCategories.map((category) => { const services = data.services.filter((service) => service.category === category); return services.length ? `<section><h2>${escapeHtml(category)}</h2>${services.map((service) => `<article><div><h3>${escapeHtml(service.name)}</h3><p>${escapeHtml(service.description)}</p></div><b>${money(service.rateMinor, service.currency)}</b><button class="secondary" data-edit-service="${service.id}">Edit</button></article>`).join("")}</section>` : ""; }).join("") || `<div class="empty"><h3>No saved services yet</h3><p>Add the services you use most often.</p></div>`}</div></div></section>`,
+  );
+  document.querySelector("#service-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(event.currentTarget));
+    const rateMinor = minor(values.rate);
+    if (rateMinor < 0) return alert("Enter a valid price.");
+    delete values.rate;
+    values.rateMinor = rateMinor;
+    action(
+      {
+        action: "save-service",
+        serviceId: editing?.id,
+        service: values,
+      },
+      editing ? "Service updated." : "Service saved and ready to use.",
+    );
+    serviceEditorId = null;
+  });
+  document.querySelectorAll("[data-edit-service]").forEach((button) =>
+    button.addEventListener("click", () => {
+      serviceEditorId = button.dataset.editService;
+      render();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }),
+  );
+  document.querySelector("#cancel-service-edit")?.addEventListener("click", () => {
+    serviceEditorId = null;
+    render();
   });
 }
 
 function settingsScreen() {
   const s = data.settings;
   const stripe = data.stripe ?? { enabled: false, mode: "not configured" };
+  const email = data.email ?? {
+    configured: false,
+    connected: false,
+    mode: "preview",
+  };
+  const emailPanel = `<section class="stripe-settings email-settings"><div><p class="kicker">Invoice email</p><h2>Gmail delivery</h2><p>${email.connected ? `<b>Connected as ${escapeHtml(email.email)}.</b> Review &amp; Send will attach the saved PDF and send it through Gmail. The app can send only; it cannot read the account owner's inbox.` : email.configured ? `<b>Ready for one-time approval.</b> Click Connect Gmail, sign into ${escapeHtml(s.email)}, and approve send-only access.` : `<b>Safe preview mode is active.</b> Review &amp; Send creates the exact email without transmitting it. To enable Gmail, first double-click <code>Configure Gmail.cmd</code> in the Invoice Desk folder and add Google OAuth credentials.`}</p></div><div class="email-connect-actions">${email.connected ? `<span class="stripe-status connected">CONNECTED</span><button class="text-button" id="disconnect-gmail">Disconnect</button>` : email.configured ? `<a class="primary" href="/api/gmail/connect">Connect ${escapeHtml(s.email)}</a>` : `<span class="stripe-status">PREVIEW ONLY</span>`}</div></section>`;
   const stripePanel = `<section class="stripe-settings"><div><p class="kicker">Card payments</p><h2>Stripe</h2><p>${stripe.enabled ? `<b>${stripe.mode === "live" ? "Live payments connected" : "Test mode connected"}.</b> Invoice Desk creates a hosted Checkout page for the exact unpaid balance and checks Stripe whenever the dashboard loads.` : `<b>Not connected yet.</b> When you have your Stripe test key, double-click <code>Configure Stripe.cmd</code> in the Invoice Desk folder. Your secret key is stored as a Windows user environment variable, never in this form or the database.`}</p>${stripe.error ? `<p class="stripe-error">Last Stripe check: ${escapeHtml(stripe.error)}</p>` : ""}</div><div class="stripe-status ${stripe.enabled ? "connected" : ""}">${stripe.enabled ? escapeHtml(stripe.mode.toUpperCase()) : "NOT CONNECTED"}</div></section>`;
   shell(
-    `<section class="simple"><p class="kicker">Used on future invoices</p><h1>Business settings</h1><p>Issued invoices keep their original details when these settings change.</p><form class="card-form settings" id="settings-form"><div class="grid"><label>Business name<input name="name" value="${escapeHtml(s.name)}" required /></label><label>Billing email<input name="email" type="email" value="${escapeHtml(s.email)}" required /></label><label>Business address<textarea name="address">${escapeHtml(s.address)}</textarea></label><label>Logo URL <small>optional</small><input name="logoUrl" type="url" value="${escapeHtml(s.logoUrl)}" /></label><label>GST registration number <small>add later if registered</small><input name="gstNumber" value="${escapeHtml(s.gstNumber)}" placeholder="123456789RT0001" /></label><label>QST registration number <small>add later if registered</small><input name="qstNumber" value="${escapeHtml(s.qstNumber)}" placeholder="1234567890TQ0001" /></label><label>Accountant email <small>used in Stage 2</small><input name="accountantEmail" type="email" value="${escapeHtml(s.accountantEmail)}" /></label><label>PayPal fallback link <small>optional</small><input name="paypalFallbackUrl" type="url" value="${escapeHtml(s.paypalFallbackUrl)}" /></label><label>Payment instructions<textarea name="paymentInstructions">${escapeHtml(s.paymentInstructions)}</textarea></label><label>Invoice prefix<input name="invoicePrefix" value="${escapeHtml(s.invoicePrefix)}" pattern="[A-Z0-9-]+" required /></label><label>Next invoice number<input name="nextInvoiceNumber" type="number" min="1" value="${s.nextInvoiceNumber}" required /></label></div><button class="primary">Save settings</button></form>${stripePanel}</section>`,
+    `<section class="simple"><p class="kicker">Used on future invoices</p><h1>Business settings</h1><p>Every new invoice is issued by the business shown here. Issued invoices keep their original details when settings change.</p><form class="card-form settings" id="settings-form"><div class="grid"><label>Business name<input name="name" value="${escapeHtml(s.name)}" required /></label><label>Billing email<input name="email" type="email" value="${escapeHtml(s.email)}" required /></label><label>Business address<textarea name="address">${escapeHtml(s.address)}</textarea></label><label>Logo URL <small>optional</small><input name="logoUrl" type="url" value="${escapeHtml(s.logoUrl)}" /></label><label>GST registration number <small>add when you have it</small><input name="gstNumber" value="${escapeHtml(s.gstNumber)}" placeholder="123456789RT0001" /></label><label>QST registration number <small>add when you have it</small><input name="qstNumber" value="${escapeHtml(s.qstNumber)}" placeholder="1234567890TQ0001" /></label><label>Accountant email <small>shown beside the monthly report</small><input name="accountantEmail" type="email" value="${escapeHtml(s.accountantEmail)}" /></label><label>Interac e-Transfer email <small>payment alternative</small><input name="etransferEmail" type="email" value="${escapeHtml(s.etransferEmail)}" /></label><label>PayPal fallback link <small>payment alternative</small><input name="paypalFallbackUrl" type="url" value="${escapeHtml(s.paypalFallbackUrl)}" /></label><label>Payment instructions<textarea name="paymentInstructions">${escapeHtml(s.paymentInstructions)}</textarea></label><label>Invoice prefix<input name="invoicePrefix" value="${escapeHtml(s.invoicePrefix)}" pattern="[A-Z0-9-]+" required /></label><label>Next invoice number<input name="nextInvoiceNumber" type="number" min="1" value="${s.nextInvoiceNumber}" required /></label></div><button class="primary">Save settings</button></form>${emailPanel}${stripePanel}</section>`,
   );
   document
     .querySelector("#settings-form")
@@ -492,11 +678,19 @@ function settingsScreen() {
         "Business settings saved.",
       );
     });
+  document.querySelector("#disconnect-gmail")?.addEventListener("click", () => {
+    if (confirm("Disconnect Gmail from Invoice Desk? Existing email records stay saved."))
+      action(
+        { action: "disconnect-gmail" },
+        "Gmail disconnected. Email preview mode is active.",
+      );
+  });
 }
 
 function render() {
   if (!data) return loginScreen();
   if (view === "editor") return renderEditor();
+  if (view === "services") return servicesScreen();
   if (view === "clients") return clientsScreen();
   if (view === "settings") return settingsScreen();
   invoicesScreen();

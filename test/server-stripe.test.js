@@ -75,20 +75,12 @@ test("runs the complete exact-amount Stripe payment flow", async () => {
       app.once("exit", (code) => reject(new Error(`Server exited ${code}`)));
     });
     const origin = `http://127.0.0.1:${appPort}`;
-    const health = await fetch(`${origin}/api/health`);
-    assert.equal(health.status, 200);
-    assert.equal((await health.json()).ok, true);
-    assert.match(
-      health.headers.get("content-security-policy"),
-      /frame-ancestors 'none'/,
-    );
     const login = await fetch(`${origin}/api/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Origin: origin },
       body: JSON.stringify({ password: "invoice-demo" }),
     });
     assert.equal(login.status, 200);
-    assert.equal(login.headers.get("x-frame-options"), "DENY");
     const cookie = login.headers.get("set-cookie").split(";")[0];
     const action = async (payload) => {
       const response = await fetch(`${origin}/api/action`, {

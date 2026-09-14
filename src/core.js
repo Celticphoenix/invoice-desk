@@ -44,11 +44,19 @@ function migrate(db) {
       address TEXT NOT NULL, gst_number TEXT NOT NULL DEFAULT '', qst_number TEXT NOT NULL DEFAULT '',
       logo_url TEXT NOT NULL, accountant_email TEXT NOT NULL,
       payment_instructions TEXT NOT NULL, paypal_fallback_url TEXT NOT NULL,
+      etransfer_email TEXT NOT NULL DEFAULT '',
       invoice_prefix TEXT NOT NULL, next_invoice_number INTEGER NOT NULL CHECK(next_invoice_number > 0)
     );
     CREATE TABLE IF NOT EXISTS clients(
       id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, company TEXT NOT NULL,
-      address TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      address TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
+      source_key TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS services(
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
+      category TEXT NOT NULL, currency TEXT NOT NULL CHECK(currency IN ('CAD','USD')),
+      rate_minor INTEGER NOT NULL CHECK(rate_minor >= 0), active INTEGER NOT NULL DEFAULT 1,
+      source_key TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS invoices(
       id TEXT PRIMARY KEY, invoice_number TEXT UNIQUE, client_id TEXT NOT NULL REFERENCES clients(id),
@@ -82,9 +90,24 @@ function migrate(db) {
     CREATE TABLE IF NOT EXISTS stripe_events(
       id TEXT PRIMARY KEY, event_type TEXT NOT NULL, processed_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS gmail_connection(
+      id INTEGER PRIMARY KEY CHECK(id=1), email TEXT NOT NULL,
+      refresh_token_cipher TEXT NOT NULL, connected_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS email_outbox(
+      id TEXT PRIMARY KEY, invoice_id TEXT NOT NULL REFERENCES invoices(id),
+      recipient_type TEXT NOT NULL CHECK(recipient_type IN ('client','accountant')),
+      recipient_email TEXT NOT NULL, subject TEXT NOT NULL, body_text TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('queued','preview','provider_accepted','failed')),
+      provider_message_id TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '',
+      attempt_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      accepted_at TEXT, UNIQUE(invoice_id,recipient_type)
+    );
     CREATE INDEX IF NOT EXISTS invoice_client_idx ON invoices(client_id);
     CREATE INDEX IF NOT EXISTS payment_invoice_idx ON payments(invoice_id);
     CREATE INDEX IF NOT EXISTS stripe_invoice_idx ON stripe_sessions(invoice_id);
+    CREATE INDEX IF NOT EXISTS service_name_idx ON services(name COLLATE NOCASE);
+    CREATE INDEX IF NOT EXISTS email_invoice_idx ON email_outbox(invoice_id);
   `);
   db.prepare("INSERT OR IGNORE INTO schema_migrations VALUES (1, ?)").run(
     now(),
@@ -181,6 +204,68 @@ function migrate(db) {
     }
     db.prepare("INSERT INTO schema_migrations VALUES (3, ?)").run(now());
   }
+  if (
+    !db.prepare("SELECT version FROM schema_migrations WHERE version=4").get()
+  ) {
+    const clientColumns = new Set(
+      db
+        .prepare("PRAGMA table_info(clients)")
+        .all()
+        .map((row) => row.name),
+    );
+    if (!clientColumns.has("phone"))
+      db.exec("ALTER TABLE clients ADD COLUMN phone TEXT NOT NULL DEFAULT ''");
+    if (!clientColumns.has("notes"))
+      db.exec("ALTER TABLE clients ADD COLUMN notes TEXT NOT NULL DEFAULT ''");
+    if (!clientColumns.has("source_key"))
+      db.exec("ALTER TABLE clients ADD COLUMN source_key TEXT NOT NULL DEFAULT ''");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS services(
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
+        category TEXT NOT NULL, currency TEXT NOT NULL CHECK(currency IN ('CAD','USD')),
+        rate_minor INTEGER NOT NULL CHECK(rate_minor >= 0), active INTEGER NOT NULL DEFAULT 1,
+        source_key TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS service_name_idx ON services(name COLLATE NOCASE);
+    `);
+    db.prepare("INSERT INTO schema_migrations VALUES (4, ?)").run(now());
+  }
+  if (
+    !db.prepare("SELECT version FROM schema_migrations WHERE version=5").get()
+  ) {
+    const settingsColumns = new Set(
+      db
+        .prepare("PRAGMA table_info(business_settings)")
+        .all()
+        .map((row) => row.name),
+    );
+    if (!settingsColumns.has("etransfer_email"))
+      db.exec(
+        "ALTER TABLE business_settings ADD COLUMN etransfer_email TEXT NOT NULL DEFAULT ''",
+      );
+    db.prepare("INSERT INTO schema_migrations VALUES (5, ?)").run(now());
+  }
+  if (
+    !db.prepare("SELECT version FROM schema_migrations WHERE version=6").get()
+  ) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS gmail_connection(
+        id INTEGER PRIMARY KEY CHECK(id=1), email TEXT NOT NULL,
+        refresh_token_cipher TEXT NOT NULL, connected_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS email_outbox(
+        id TEXT PRIMARY KEY, invoice_id TEXT NOT NULL REFERENCES invoices(id),
+        recipient_type TEXT NOT NULL CHECK(recipient_type IN ('client','accountant')),
+        recipient_email TEXT NOT NULL, subject TEXT NOT NULL, body_text TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('queued','preview','provider_accepted','failed')),
+        provider_message_id TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '',
+        attempt_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        accepted_at TEXT, UNIQUE(invoice_id,recipient_type)
+      );
+      CREATE INDEX IF NOT EXISTS email_invoice_idx ON email_outbox(invoice_id);
+    `);
+    db.prepare("INSERT INTO schema_migrations VALUES (6, ?)").run(now());
+  }
 }
 
 function problem(status, message) {
@@ -245,10 +330,28 @@ export function calculate(lines, taxes) {
   const calculatedLines = lines.map((line) => {
     const quantity = parseQuantity(line.quantity);
     const rateMinor = integer(line.rateMinor, "Rate", 0, 10_000_000_000);
+    const category = text(
+      line.category ?? "Other",
+      "Revenue category",
+      80,
+      true,
+    );
+    if (
+      ![
+        "Services",
+        "Products",
+        "Consulting",
+        "Commission",
+        "Other",
+      ].includes(category)
+    )
+      throw problem(400, "Revenue category is invalid");
     return {
       description: text(line.description, "Service description", 500, true),
       quantity: quantity.clean,
       rateMinor,
+      category,
+      serviceId: text(line.serviceId ?? "", "Saved service", 100),
       amountMinor: roundRatio(quantity.scaled * BigInt(rateMinor), 10000n),
     };
   });
@@ -299,6 +402,7 @@ function settings(db = database()) {
     accountantEmail: row.accountant_email,
     paymentInstructions: row.payment_instructions,
     paypalFallbackUrl: row.paypal_fallback_url,
+    etransferEmail: row.etransfer_email ?? "",
     invoicePrefix: row.invoice_prefix,
     nextInvoiceNumber: Number(row.next_invoice_number),
   };
@@ -311,6 +415,20 @@ function clientView(row) {
     email: row.email,
     company: row.company,
     address: row.address,
+    phone: row.phone ?? "",
+    notes: row.notes ?? "",
+  };
+}
+
+function serviceView(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    category: row.category,
+    currency: row.currency,
+    rateMinor: Number(row.rate_minor),
+    active: Boolean(row.active),
   };
 }
 
@@ -370,6 +488,36 @@ function invoiceView(row, db = database()) {
   };
 }
 
+function outboxView(row) {
+  return {
+    id: row.id,
+    invoiceId: row.invoice_id,
+    invoiceNumber: row.invoice_number ?? "",
+    recipientType: row.recipient_type,
+    recipientEmail: row.recipient_email,
+    subject: row.subject,
+    bodyText: row.body_text,
+    status: row.status,
+    providerMessageId: row.provider_message_id,
+    lastError: row.last_error,
+    attemptCount: Number(row.attempt_count),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    acceptedAt: row.accepted_at,
+  };
+}
+
+function findOutbox(outboxId, db = database()) {
+  const id = text(outboxId, "Email", 100, true);
+  const row = db
+    .prepare(
+      "SELECT e.*,i.invoice_number FROM email_outbox e JOIN invoices i ON i.id=e.invoice_id WHERE e.id=?",
+    )
+    .get(id);
+  if (!row) throw problem(404, "Email record not found");
+  return row;
+}
+
 function findInvoice(id, db = database()) {
   const row = db
     .prepare(
@@ -403,6 +551,10 @@ export function dashboard() {
     )
     .all()
     .map((row) => invoiceView(row, db));
+  const services = db
+    .prepare("SELECT * FROM services WHERE active=1 ORDER BY category, name COLLATE NOCASE")
+    .all()
+    .map(serviceView);
   const payments = db
     .prepare(
       "SELECT p.*, i.invoice_number FROM payments p JOIN invoices i ON i.id=p.invoice_id ORDER BY p.payment_date DESC, p.created_at DESC",
@@ -421,30 +573,138 @@ export function dashboard() {
       status: row.status,
       correctionOfId: row.correction_of_id,
     }));
-  return { settings: settings(db), clients, invoices, payments };
+  const emailOutbox = db
+    .prepare(
+      "SELECT e.*,i.invoice_number FROM email_outbox e JOIN invoices i ON i.id=e.invoice_id ORDER BY e.created_at DESC",
+    )
+    .all()
+    .map(outboxView);
+  return { settings: settings(db), clients, services, invoices, payments, emailOutbox };
 }
 
 export function createClient(input) {
+  return saveClient(input);
+}
+
+export function saveClient(input, id) {
   const db = database();
-  const id = randomUUID();
+  const clientId = id ? text(id, "Client", 100, true) : randomUUID();
+  const existing = id
+    ? db.prepare("SELECT * FROM clients WHERE id=?").get(clientId)
+    : null;
+  if (id && !existing) throw problem(404, "Client not found");
   const timestamp = now();
   const value = {
     name: text(input.name, "Client name", 160, true),
-    email: email(input.email, "Client email", true),
+    email: email(input.email ?? "", "Client email"),
     company: text(input.company ?? "", "Company", 160),
     address: text(input.address ?? "", "Address", 1000),
+    phone: text(input.phone ?? "", "Phone", 80),
+    notes: text(input.notes ?? "", "Client notes", 2000),
+    sourceKey: text(
+      input.sourceKey ?? existing?.source_key ?? "",
+      "Source key",
+      500,
+    ),
   };
-  db.prepare("INSERT INTO clients VALUES (?,?,?,?,?,?,?)").run(
-    id,
-    value.name,
-    value.email,
-    value.company,
-    value.address,
-    timestamp,
-    timestamp,
+  if (id) {
+    db.prepare(
+      "UPDATE clients SET name=?,email=?,company=?,address=?,phone=?,notes=?,source_key=?,updated_at=? WHERE id=?",
+    ).run(
+      value.name,
+      value.email,
+      value.company,
+      value.address,
+      value.phone,
+      value.notes,
+      value.sourceKey,
+      timestamp,
+      clientId,
+    );
+    audit(db, "client", clientId, "updated", { name: value.name });
+  } else {
+    db.prepare(
+      "INSERT INTO clients(id,name,email,company,address,phone,notes,source_key,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    ).run(
+      clientId,
+      value.name,
+      value.email,
+      value.company,
+      value.address,
+      value.phone,
+      value.notes,
+      value.sourceKey,
+      timestamp,
+      timestamp,
+    );
+    audit(db, "client", clientId, "created", { name: value.name });
+  }
+  return { id: clientId, ...value };
+}
+
+export function saveService(input, id) {
+  const db = database();
+  const serviceId = id ? text(id, "Service", 100, true) : randomUUID();
+  const existing = id
+    ? db.prepare("SELECT * FROM services WHERE id=?").get(serviceId)
+    : null;
+  if (id && !existing) throw problem(404, "Service not found");
+  const timestamp = now();
+  const value = {
+    name: text(input.name, "Service name", 160, true),
+    description: text(input.description ?? input.name, "Description", 500, true),
+    category: text(input.category ?? "Other", "Revenue category", 80, true),
+    currency: currency(input.currency ?? "CAD"),
+    rateMinor: integer(input.rateMinor, "Rate", 0, 10_000_000_000),
+    sourceKey: text(
+      input.sourceKey ?? existing?.source_key ?? "",
+      "Source key",
+      500,
+    ),
+  };
+  if (
+    ![
+      "Services",
+      "Products",
+      "Consulting",
+      "Commission",
+      "Other",
+    ].includes(value.category)
+  )
+    throw problem(400, "Revenue category is invalid");
+  if (id) {
+    db.prepare(
+      "UPDATE services SET name=?,description=?,category=?,currency=?,rate_minor=?,source_key=?,updated_at=? WHERE id=?",
+    ).run(
+      value.name,
+      value.description,
+      value.category,
+      value.currency,
+      value.rateMinor,
+      value.sourceKey,
+      timestamp,
+      serviceId,
+    );
+    audit(db, "service", serviceId, "updated", { name: value.name });
+  } else {
+    db.prepare(
+      "INSERT INTO services(id,name,description,category,currency,rate_minor,active,source_key,created_at,updated_at) VALUES (?,?,?,?,?,?,1,?,?,?)",
+    ).run(
+      serviceId,
+      value.name,
+      value.description,
+      value.category,
+      value.currency,
+      value.rateMinor,
+      value.sourceKey,
+      timestamp,
+      timestamp,
+    );
+    audit(db, "service", serviceId, "created", { name: value.name });
+  }
+  return serviceView(
+    db.prepare("SELECT * FROM services WHERE id=?").get(serviceId),
   );
-  audit(db, "client", id, "created", { name: value.name });
-  return { id, ...value };
 }
 
 export function saveSettings(input) {
@@ -462,6 +722,7 @@ export function saveSettings(input) {
       2000,
     ),
     paypalFallbackUrl: text(input.paypalFallbackUrl ?? "", "PayPal link", 1000),
+    etransferEmail: email(input.etransferEmail ?? "", "e-Transfer email"),
     invoicePrefix: text(input.invoicePrefix, "Invoice prefix", 12, true),
     nextInvoiceNumber: integer(
       input.nextInvoiceNumber,
@@ -477,7 +738,7 @@ export function saveSettings(input) {
     );
   const db = database();
   db.prepare(
-    "UPDATE business_settings SET name=?,email=?,address=?,gst_number=?,qst_number=?,logo_url=?,accountant_email=?,payment_instructions=?,paypal_fallback_url=?,invoice_prefix=?,next_invoice_number=? WHERE id=1",
+    "UPDATE business_settings SET name=?,email=?,address=?,gst_number=?,qst_number=?,logo_url=?,accountant_email=?,payment_instructions=?,paypal_fallback_url=?,etransfer_email=?,invoice_prefix=?,next_invoice_number=? WHERE id=1",
   ).run(
     value.name,
     value.email,
@@ -488,6 +749,7 @@ export function saveSettings(input) {
     value.accountantEmail,
     value.paymentInstructions,
     value.paypalFallbackUrl,
+    value.etransferEmail,
     value.invoicePrefix,
     value.nextInvoiceNumber,
   );
@@ -623,6 +885,21 @@ function makePdf(snapshot) {
       text: `Payment: ${snapshot.business.paymentInstructions || "Contact us for payment instructions."}`,
       size: 10,
     },
+    {
+      text: "Preferred payment: secure Stripe card link supplied with this invoice.",
+      size: 10,
+    },
+    ...(snapshot.business.etransferEmail
+      ? [
+          {
+            text: `Interac e-Transfer: ${snapshot.business.etransferEmail}`,
+            size: 10,
+          },
+        ]
+      : []),
+    ...(snapshot.business.paypalFallbackUrl
+      ? [{ text: `PayPal: ${snapshot.business.paypalFallbackUrl}`, size: 10 }]
+      : []),
   ];
   const wrapped = rows.flatMap((row) => {
     if (!row.text) return [row];
@@ -882,6 +1159,23 @@ export function voidAndReissue(invoiceId, rawReason) {
   }
 }
 
+export function duplicateInvoice(invoiceId) {
+  const original = findInvoice(text(invoiceId, "Invoice", 100, true));
+  const issueDate = new Date().toISOString().slice(0, 10);
+  const due = new Date(`${issueDate}T12:00:00Z`);
+  due.setUTCDate(due.getUTCDate() + 30);
+  return saveDraft({
+    clientId: original.clientId,
+    currency: original.currency,
+    issueDate,
+    dueDate: due.toISOString().slice(0, 10),
+    terms: original.terms,
+    notes: original.notes,
+    lines: original.lines.map(({ amountMinor: _amount, ...line }) => line),
+    taxes: original.taxes.map(({ amountMinor: _amount, ...tax }) => tax),
+  });
+}
+
 export function payableInvoice(invoiceId) {
   return findInvoice(text(invoiceId, "Invoice", 100, true));
 }
@@ -1060,6 +1354,166 @@ export function readPdf(id) {
   return { bytes: readFileSync(file), filename: `${row.invoice_number}.pdf` };
 }
 
+export function gmailConnection() {
+  const row = database()
+    .prepare("SELECT * FROM gmail_connection WHERE id=1")
+    .get();
+  return row
+    ? {
+        email: row.email,
+        refreshTokenCipher: row.refresh_token_cipher,
+        connectedAt: row.connected_at,
+      }
+    : null;
+}
+
+export function saveGmailConnection(input) {
+  const db = database();
+  const value = {
+    email: email(input.email, "Connected Gmail address", true),
+    refreshTokenCipher: text(
+      input.refreshTokenCipher,
+      "Gmail authorization",
+      10000,
+      true,
+    ),
+  };
+  const timestamp = now();
+  db.prepare(
+    `INSERT INTO gmail_connection(id,email,refresh_token_cipher,connected_at,updated_at)
+     VALUES (1,?,?,?,?)
+     ON CONFLICT(id) DO UPDATE SET email=excluded.email,
+       refresh_token_cipher=excluded.refresh_token_cipher,updated_at=excluded.updated_at`,
+  ).run(value.email, value.refreshTokenCipher, timestamp, timestamp);
+  audit(db, "gmail", "1", "connected", { email: value.email });
+  return { email: value.email, connectedAt: timestamp };
+}
+
+export function disconnectGmail() {
+  const db = database();
+  const existing = gmailConnection();
+  db.prepare("DELETE FROM gmail_connection WHERE id=1").run();
+  if (existing)
+    audit(db, "gmail", "1", "disconnected", { email: existing.email });
+  return { disconnected: true };
+}
+
+export function queueInvoiceEmail(invoiceId, mode = "queued") {
+  if (!['queued', 'preview'].includes(mode))
+    throw problem(400, "Email mode is invalid");
+  const db = database();
+  const invoice = findInvoice(text(invoiceId, "Invoice", 100, true), db);
+  if (invoice.state !== "issued")
+    throw problem(409, "Finalize the invoice before sending it");
+  const row = db
+    .prepare("SELECT snapshot_json FROM invoices WHERE id=?")
+    .get(invoice.id);
+  const snapshot = JSON.parse(row.snapshot_json);
+  const recipientEmail = email(
+    snapshot.client.email,
+    "Client email",
+    true,
+  );
+  const existing = db
+    .prepare(
+      "SELECT e.*,i.invoice_number FROM email_outbox e JOIN invoices i ON i.id=e.invoice_id WHERE e.invoice_id=? AND e.recipient_type='client'",
+    )
+    .get(invoice.id);
+  if (existing?.status === "provider_accepted") return outboxView(existing);
+  const paymentLines = [];
+  if (invoice.stripeCheckout?.url)
+    paymentLines.push(`Pay securely with Stripe: ${invoice.stripeCheckout.url}`);
+  if (snapshot.business.etransferEmail)
+    paymentLines.push(`Interac e-Transfer: ${snapshot.business.etransferEmail}`);
+  if (snapshot.business.paypalFallbackUrl)
+    paymentLines.push(`PayPal: ${snapshot.business.paypalFallbackUrl}`);
+  if (!paymentLines.length && snapshot.business.paymentInstructions)
+    paymentLines.push(snapshot.business.paymentInstructions);
+  const subject = `${snapshot.business.name} invoice ${snapshot.invoiceNumber}`;
+  const bodyText = [
+    `Hello ${snapshot.client.name},`,
+    "",
+    `Your ${snapshot.business.name} invoice ${snapshot.invoiceNumber} for ${snapshot.currency} ${(snapshot.totalMinor / 100).toFixed(2)} is attached.`,
+    `Payment is due ${snapshot.dueDate}.`,
+    "",
+    ...(paymentLines.length ? ["Payment options:", ...paymentLines, ""] : []),
+    "Thank you,",
+    snapshot.business.name,
+    snapshot.business.email,
+  ].join("\r\n");
+  const id = existing?.id ?? randomUUID();
+  const timestamp = now();
+  db.prepare(
+    `INSERT INTO email_outbox(
+       id,invoice_id,recipient_type,recipient_email,subject,body_text,status,
+       provider_message_id,last_error,attempt_count,created_at,updated_at,accepted_at
+     ) VALUES (?,?,'client',?,?,?,?, '', '',0,?,?,NULL)
+     ON CONFLICT(invoice_id,recipient_type) DO UPDATE SET
+       recipient_email=excluded.recipient_email,subject=excluded.subject,
+       body_text=excluded.body_text,status=excluded.status,
+       provider_message_id='',last_error='',updated_at=excluded.updated_at,accepted_at=NULL`,
+  ).run(
+    id,
+    invoice.id,
+    recipientEmail,
+    subject,
+    bodyText,
+    mode,
+    timestamp,
+    timestamp,
+  );
+  audit(db, "email", id, mode === "preview" ? "preview_created" : "queued", {
+    invoiceId: invoice.id,
+    recipientType: "client",
+  });
+  return outboxView(
+    db
+      .prepare(
+        "SELECT e.*,i.invoice_number FROM email_outbox e JOIN invoices i ON i.id=e.invoice_id WHERE e.id=?",
+      )
+      .get(id),
+  );
+}
+
+export function emailPayload(outboxId) {
+  const db = database();
+  const row = findOutbox(outboxId, db);
+  const invoice = db
+    .prepare("SELECT snapshot_json FROM invoices WHERE id=?")
+    .get(row.invoice_id);
+  const snapshot = JSON.parse(invoice.snapshot_json);
+  return {
+    ...outboxView(row),
+    businessName: snapshot.business.name,
+    pdf: readPdf(row.invoice_id),
+  };
+}
+
+export function markEmailAccepted(outboxId, providerMessageId) {
+  const db = database();
+  const id = text(outboxId, "Email", 100, true);
+  const providerId = text(providerMessageId, "Gmail message", 500, true);
+  const timestamp = now();
+  const result = db
+    .prepare(
+      "UPDATE email_outbox SET status='provider_accepted',provider_message_id=?,last_error='',attempt_count=attempt_count+1,updated_at=?,accepted_at=? WHERE id=? AND status!='provider_accepted'",
+    )
+    .run(providerId, timestamp, timestamp, id);
+  if (result.changes) audit(db, "email", id, "provider_accepted", { providerId });
+  return outboxView(findOutbox(id, db));
+}
+
+export function markEmailFailed(outboxId, rawError) {
+  const db = database();
+  const id = text(outboxId, "Email", 100, true);
+  const error = text(rawError || "Email provider rejected the message", "Email error", 1000, true);
+  db.prepare(
+    "UPDATE email_outbox SET status='failed',last_error=?,attempt_count=attempt_count+1,updated_at=? WHERE id=? AND status!='provider_accepted'",
+  ).run(error, now(), id);
+  audit(db, "email", id, "failed", { error });
+  return outboxView(findOutbox(id, db));
+}
+
 function csvCell(value) {
   let clean = String(value ?? "");
   if (/^[\t\r\n ]*[=+\-@]/.test(clean)) clean = `'${clean}`;
@@ -1099,6 +1553,7 @@ function invoiceCsvFor(invoices) {
       (invoice.paymentsMinor / 100).toFixed(2),
       (invoice.balanceMinor / 100).toFixed(2),
       invoice.state,
+      [...new Set(invoice.lines.map((line) => line.category ?? "Other"))].join("; "),
     ];
   });
   return [
@@ -1117,6 +1572,7 @@ function invoiceCsvFor(invoices) {
       "payments",
       "balance",
       "invoice_state",
+      "revenue_categories",
     ],
     ...rows,
   ]
@@ -1154,14 +1610,38 @@ function paymentCsvFor(payments) {
     .join("\r\n");
 }
 
-function accountantYear(rawYear) {
-  if (rawYear === undefined || rawYear === null || rawYear === "") return null;
-  if (!/^\d{4}$/.test(String(rawYear)))
-    throw problem(400, "Choose a valid four-digit year");
-  const year = Number(rawYear);
+function accountantPeriod(rawPeriod) {
+  if (rawPeriod === undefined || rawPeriod === null || rawPeriod === "")
+    return null;
+  const period = String(rawPeriod);
+  if (!/^\d{4}(?:-(?:0[1-9]|1[0-2]))?$/.test(period))
+    throw problem(400, "Choose a valid month or year");
+  const year = Number(period.slice(0, 4));
   if (year < 2000 || year > 2200)
     throw problem(400, "Choose a year from 2000 to 2200");
-  return String(year);
+  return period;
+}
+
+function categoryCsvFor(invoices) {
+  const totals = new Map();
+  for (const invoice of invoices.filter((item) => item.state === "issued")) {
+    for (const line of invoice.lines) {
+      const category = line.category ?? "Other";
+      const key = `${invoice.currency}\u0000${category}`;
+      totals.set(key, (totals.get(key) ?? 0) + Number(line.amountMinor));
+    }
+  }
+  const rows = [...totals.entries()]
+    .map(([key, subtotal]) => {
+      const [currencyCode, category] = key.split("\u0000");
+      return [category, currencyCode, (subtotal / 100).toFixed(2)];
+    })
+    .sort((left, right) =>
+      `${left[1]} ${left[0]}`.localeCompare(`${right[1]} ${right[0]}`),
+    );
+  return [["revenue_category", "currency", "subtotal"], ...rows]
+    .map((row) => row.map(csvCell).join(","))
+    .join("\r\n");
 }
 
 function crc32(bytes) {
@@ -1219,14 +1699,14 @@ function zip(entries) {
   return Buffer.concat([...localParts, ...centralParts, end]);
 }
 
-function packageSummary({ business, year, invoices, payments }) {
+function packageSummary({ business, period, invoices, payments }) {
   const active = invoices.filter((invoice) => invoice.state === "issued");
   const currencies = [...new Set([...invoices, ...payments].map((item) => item.currency))].sort();
   const lines = [
     "INVOICE DESK - ACCOUNTANT PACKAGE",
     "",
     `Business: ${business.name}`,
-    `Period: ${year ?? "All records"}`,
+    `Period: ${period ?? "All records"}`,
     `Created: ${new Date().toISOString()}`,
     `Finalized invoices included: ${invoices.length}`,
     `Payments included: ${payments.length}`,
@@ -1265,6 +1745,10 @@ function packageSummary({ business, year, invoices, payments }) {
       `  Current balance on included invoices: ${amount(totals.balance)}`,
     );
   }
+  lines.push("", "REVENUE BY CATEGORY (before tax; active invoices only)");
+  const categoryRows = categoryCsvFor(active).split("\r\n").slice(1);
+  if (categoryRows.length) lines.push(...categoryRows.map((row) => `  ${row}`));
+  else lines.push("  No active invoice revenue in this period.");
   lines.push(
     "",
     "NOTES",
@@ -1277,10 +1761,10 @@ function packageSummary({ business, year, invoices, payments }) {
   return lines.join("\r\n");
 }
 
-export function accountantPackage(rawYear) {
-  const year = accountantYear(rawYear);
+export function accountantPackage(rawPeriod) {
+  const period = accountantPeriod(rawPeriod);
   const data = dashboard();
-  const inPeriod = (date) => !year || String(date).startsWith(`${year}-`);
+  const inPeriod = (date) => !period || String(date).startsWith(period);
   const invoices = data.invoices.filter(
     (invoice) => invoice.state !== "draft" && inPeriod(invoice.issueDate),
   );
@@ -1290,13 +1774,14 @@ export function accountantPackage(rawYear) {
       name: "README.txt",
       contents: packageSummary({
         business: data.settings,
-        year,
+        period,
         invoices,
         payments,
       }),
     },
     { name: "invoice-records.csv", contents: invoiceCsvFor(invoices) },
     { name: "payment-records.csv", contents: paymentCsvFor(payments) },
+    { name: "revenue-by-category.csv", contents: categoryCsvFor(invoices) },
   ];
   for (const invoice of invoices) {
     const pdf = readPdf(invoice.id);
@@ -1304,7 +1789,7 @@ export function accountantPackage(rawYear) {
   }
   return {
     bytes: zip(entries),
-    filename: `accountant-package-${year ?? "all-records"}.zip`,
+    filename: `accountant-package-${period ?? "all-records"}.zip`,
     invoiceCount: invoices.length,
     paymentCount: payments.length,
   };
