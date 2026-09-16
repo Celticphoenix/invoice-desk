@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: ko-reps-invoice-desk
+    runtime: docker
+    plan: starter
+    region: ohio
+    autoDeploy: false
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: INVOICE_DESK_HOST
+        value: 0.0.0.0
+      - key: INVOICE_DESK_DATA_ROOT
+        value: /app/data
+      - key: INVOICE_DESK_PASSWORD
+        sync: false
+      - key: INVOICE_DESK_SESSION_SECRET
+        sync: false
+      - key: INVOICE_DESK_TOKEN_SECRET
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_SUCCESS_URL
+        value: https://invoices.ecopromise.com
+      - key: STRIPE_CANCEL_URL
+        value: https://invoices.ecopromise.com
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        value: https://invoices.ecopromise.com/api/gmail/callback
+    disk:
+      name: invoice-data
+      mountPath: /app/data
+      sizeGB: 1

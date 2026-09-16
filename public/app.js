@@ -81,7 +81,7 @@ async function action(payload, success) {
 }
 
 function loginScreen(error = "") {
-  app.innerHTML = `<section class="login-screen"><form id="login-form" class="login-card"><div class="brand-mark">N</div><p class="kicker">Private internal tool</p><h1>Invoice Desk</h1><p>One password. No public accounts. No payment credentials needed.</p>${error ? `<div class="notice error">${escapeHtml(error)}</div>` : ""}<label>Password<input name="password" type="password" required autofocus autocomplete="current-password" /></label><button class="primary">Open Invoice Desk</button><small>Local demo password: <code>invoice-demo</code></small></form></section>`;
+  app.innerHTML = `<section class="login-screen"><form id="login-form" class="login-card"><div class="brand-mark">K</div><p class="kicker">Private internal tool</p><h1>KO Reps Invoice Desk</h1><p>One password. No public accounts. No payment credentials needed.</p>${error ? `<div class="notice error">${escapeHtml(error)}</div>` : ""}<label>Password<input name="password" type="password" required autofocus autocomplete="current-password" /></label><button class="primary">Open Invoice Desk</button></form></section>`;
   document
     .querySelector("#login-form")
     .addEventListener("submit", async (event) => {
@@ -102,7 +102,7 @@ function loginScreen(error = "") {
 }
 
 function shell(content) {
-  app.innerHTML = `<header><button class="brand" data-view="invoices"><span class="brand-mark">N</span><span><b>Invoice Desk</b><small>Private &amp; internal</small></span></button><nav><button data-view="invoices" class="${view === "invoices" ? "active" : ""}">Invoices</button><button data-view="services" class="${view === "services" ? "active" : ""}">Services &amp; prices</button><button data-view="clients" class="${view === "clients" ? "active" : ""}">Clients</button><button data-view="campaigns" class="${view === "campaigns" ? "active" : ""}">Campaigns</button><button data-view="settings" class="${view === "settings" ? "active" : ""}">Settings</button></nav><button class="signout" id="signout">Sign out</button></header>${notice ? `<div class="toast">${escapeHtml(notice)}</div>` : ""}<main class="page">${content}</main>`;
+  app.innerHTML = `<header><button class="brand" data-view="invoices"><span class="brand-mark">K</span><span><b>KO Reps Invoice Desk</b><small>Private &amp; internal</small></span></button><nav><button data-view="invoices" class="${view === "invoices" ? "active" : ""}">Invoices</button><button data-view="services" class="${view === "services" ? "active" : ""}">Services &amp; prices</button><button data-view="clients" class="${view === "clients" ? "active" : ""}">Clients</button><button data-view="campaigns" class="${view === "campaigns" ? "active" : ""}">Campaigns</button><button data-view="settings" class="${view === "settings" ? "active" : ""}">Settings</button></nav><button class="signout" id="signout">Sign out</button></header>${notice ? `<div class="toast">${escapeHtml(notice)}</div>` : ""}<main class="page">${content}</main>`;
   document.querySelectorAll("[data-view]").forEach((button) =>
     button.addEventListener("click", () => {
       view = button.dataset.view;

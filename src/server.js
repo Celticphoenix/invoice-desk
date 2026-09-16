@@ -52,7 +52,7 @@ import {
   verifyStripeWebhook,
 } from "./stripe.js";
 
-const port = Number(process.env.INVOICE_DESK_PORT ?? 3210);
+const port = Number(process.env.PORT ?? process.env.INVOICE_DESK_PORT ?? 3210);
 const host = process.env.INVOICE_DESK_HOST ?? "127.0.0.1";
 const production = process.env.NODE_ENV === "production";
 const secureCookies =
@@ -329,6 +329,8 @@ const server = createServer(async (request, response) => {
     `http://${request.headers.host ?? "localhost"}`,
   );
   try {
+    if (request.method === "GET" && url.pathname === "/api/health")
+      return json(response, 200, { ok: true });
     if (request.method === "GET" && staticFiles[url.pathname]) {
       const [filename, type] = staticFiles[url.pathname];
       const contents = readFileSync(path.resolve("public", filename));
