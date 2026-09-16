@@ -19,18 +19,10 @@ services:
         sync: false
       - key: INVOICE_DESK_TOKEN_SECRET
         sync: false
-      - key: STRIPE_SECRET_KEY
-        sync: false
       - key: STRIPE_SUCCESS_URL
         value: https://invoices.ecopromise.com
       - key: STRIPE_CANCEL_URL
         value: https://invoices.ecopromise.com
-      - key: STRIPE_WEBHOOK_SECRET
-        sync: false
-      - key: GOOGLE_CLIENT_ID
-        sync: false
-      - key: GOOGLE_CLIENT_SECRET
-        sync: false
       - key: GOOGLE_REDIRECT_URI
         value: https://invoices.ecopromise.com/api/gmail/callback
     disk:
