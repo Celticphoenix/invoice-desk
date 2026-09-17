@@ -987,6 +987,33 @@ export function saveDraft(input, id) {
   return findInvoice(invoiceId, db);
 }
 
+export function deleteDraft(invoiceId) {
+  const db = database();
+  const id = text(invoiceId, "Invoice", 100, true);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const invoice = findInvoice(id, db);
+    if (invoice.state !== "draft")
+      throw problem(409, "Only drafts can be deleted");
+
+    db.prepare(
+      "UPDATE invoices SET replaced_by_invoice_id=NULL,updated_at=? WHERE replaced_by_invoice_id=?",
+    ).run(now(), id);
+    db.prepare("DELETE FROM invoices WHERE id=? AND state='draft'").run(id);
+    audit(db, "invoice", id, "draft_deleted", {
+      clientId: invoice.clientId,
+      currency: invoice.currency,
+      totalMinor: invoice.totalMinor,
+      replacesInvoiceId: invoice.replacesInvoiceId,
+    });
+    db.exec("COMMIT");
+    return { deleted: true, invoiceId: id };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 function pdfEscape(value) {
   return value
     .replace(/\\/g, "\\\\")

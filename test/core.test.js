@@ -11,6 +11,7 @@ import {
   correctPayment,
   createClient,
   dashboard,
+  deleteDraft,
   duplicateInvoice,
   emailPayload,
   finishCampaign,
@@ -220,6 +221,29 @@ test("freezes issued records and the exact PDF", () => {
   assert.equal(first.subarray(0, 4).toString(), "%PDF");
   assert.match(first.toString("latin1"), /GST number: 123456789RT0001/);
   assert.match(first.toString("latin1"), /QST number: 1234567890TQ0001/);
+});
+
+test("deletes drafts without allowing issued invoice history to be removed", () => {
+  const disposable = saveDraft(draft(clientId));
+  assert.deepEqual(deleteDraft(disposable.id), {
+    deleted: true,
+    invoiceId: disposable.id,
+  });
+  assert.equal(
+    dashboard().invoices.some((invoice) => invoice.id === disposable.id),
+    false,
+  );
+
+  const issued = issueInvoice(saveDraft(draft(clientId)).id);
+  assert.throws(() => deleteDraft(issued.id), /Only drafts can be deleted/);
+
+  const replacement = voidAndReissue(issued.id, "Wrong service date");
+  deleteDraft(replacement.id);
+  const original = dashboard().invoices.find(
+    (invoice) => invoice.id === issued.id,
+  );
+  assert.equal(original.state, "void");
+  assert.equal(original.replacedByInvoiceId, null);
 });
 
 test("records a verified Stripe Checkout payment exactly once", () => {

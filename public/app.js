@@ -202,7 +202,7 @@ function invoiceCards(invoices) {
         : "Finalize & preview email";
       const draftActions =
         invoice.state === "draft"
-          ? `<button class="secondary" data-edit="${invoice.id}">Edit draft</button><button class="secondary" data-issue="${invoice.id}">Finalize PDF only</button><button class="primary" data-review-send="${invoice.id}">${sendLabel}</button>`
+          ? `<button class="secondary" data-edit="${invoice.id}">Edit draft</button><button class="secondary" data-issue="${invoice.id}">Finalize PDF only</button><button class="primary" data-review-send="${invoice.id}">${sendLabel}</button><button class="danger-link" data-delete-draft="${invoice.id}">Delete draft</button>`
           : `<a class="secondary" href="/api/pdf/${invoice.id}">Download PDF</a><button class="secondary" data-duplicate="${invoice.id}">Make another like this</button>${emailRecord?.status === "provider_accepted" ? "" : `<button class="primary" data-review-send="${invoice.id}">${sendLabel}</button>`}`;
       const voidAction =
         invoice.state === "issued" && invoice.paymentsMinor === 0
@@ -249,6 +249,23 @@ function bindInvoiceActions() {
         action(
           { action: "issue", invoiceId: button.dataset.issue },
           "Invoice issued and its PDF saved.",
+        );
+    }),
+  );
+  document.querySelectorAll("[data-delete-draft]").forEach((button) =>
+    button.addEventListener("click", () => {
+      const invoice = data.invoices.find(
+        (item) => item.id === button.dataset.deleteDraft,
+      );
+      if (
+        invoice &&
+        confirm(
+          `Delete this draft for ${invoice.clientName}? This cannot be undone.`,
+        )
+      )
+        action(
+          { action: "delete-draft", invoiceId: invoice.id },
+          "Draft deleted.",
         );
     }),
   );
