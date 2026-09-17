@@ -8,6 +8,10 @@ let serviceEditorId = null;
 let campaignEditorId = null;
 
 const revenueCategories = [
+  "Medical Services",
+  "Fighter Management",
+  "Sponsorship",
+  "Purse Percentage",
   "Services",
   "Products",
   "Consulting",
