@@ -379,6 +379,42 @@ test("saves reusable services, edits imported clients and duplicates invoices", 
   assert.equal(dashboard().clients[0].phone, "514-555-0100");
 });
 
+test("calculates sponsorship and purse services from a base amount and percentage", () => {
+  const service = saveService({
+    name: "Sponsorship percentage",
+    description: "KO Reps sponsorship commission",
+    category: "Sponsorship",
+    currency: "CAD",
+    rateMinor: 99999,
+    percentageThousandths: 12500,
+  });
+  assert.equal(service.pricingType, "percentage");
+  assert.equal(service.rateMinor, 0);
+  assert.equal(service.percentageThousandths, 12500);
+
+  const saved = saveDraft({
+    ...draft(clientId),
+    lines: [
+      {
+        serviceId: service.id,
+        description: service.description,
+        category: service.category,
+        pricingType: "percentage",
+        percentageBaseMinor: 200000,
+        percentageThousandths: 12500,
+        quantity: "99",
+        rateMinor: 1,
+      },
+    ],
+    taxes: [],
+  });
+  assert.equal(saved.lines[0].quantity, "1");
+  assert.equal(saved.lines[0].rateMinor, 25000);
+  assert.equal(saved.lines[0].amountMinor, 25000);
+  assert.equal(saved.lines[0].percentageBaseMinor, 200000);
+  assert.equal(saved.totalMinor, 25000);
+});
+
 test("keeps a persistent duplicate-safe invoice email outbox", () => {
   const invoice = issueInvoice(saveDraft(draft(clientId)).id);
   const preview = queueInvoiceEmail(invoice.id, "preview");

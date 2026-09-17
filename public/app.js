@@ -45,6 +45,24 @@ function minor(value) {
   return Number(whole) * 100 + Number(cents.padEnd(2, "0"));
 }
 
+function percentageThousandths(value) {
+  const clean = String(value ?? "").trim();
+  if (!/^\d+(?:\.\d{0,3})?$/.test(clean) || Number(clean) > 100) return -1;
+  return Math.round(Number(clean) * 1000);
+}
+
+function formatPercentage(value) {
+  return (Number(value ?? 0) / 1000).toFixed(3).replace(/\.?0+$/, "");
+}
+
+function servicePrice(service) {
+  if (service.pricingType === "percentage") {
+    const percentage = formatPercentage(service.percentageThousandths);
+    return percentage === "0" ? "Percentage" : `${percentage}%`;
+  }
+  return money(service.rateMinor, service.currency);
+}
+
 function categoryOptions(selected) {
   return revenueCategories
     .map(
@@ -420,15 +438,16 @@ function openEditor(invoice = null) {
         dueDate: invoice.dueDate,
         terms: invoice.terms,
         notes: invoice.notes,
-        lines: invoice.lines.map(
-          ({ description, quantity, rateMinor, category, serviceId }) => ({
-          description,
-          quantity,
-          rateMinor,
-            category: category ?? "Other",
-            serviceId: serviceId ?? "",
-          }),
-        ),
+        lines: invoice.lines.map((line) => ({
+          description: line.description,
+          quantity: line.quantity,
+          rateMinor: line.rateMinor,
+          category: line.category ?? "Other",
+          serviceId: line.serviceId ?? "",
+          pricingType: line.pricingType ?? "fixed",
+          percentageBaseMinor: line.percentageBaseMinor ?? 0,
+          percentageThousandths: line.percentageThousandths ?? 0,
+        })),
         taxes: invoice.taxes.map(
           ({ label, rateThousandths, rateBasisPoints }) => ({
             label,
@@ -451,12 +470,52 @@ function openEditor(invoice = null) {
             rateMinor: 0,
             category: "Other",
             serviceId: "",
+            pricingType: "fixed",
+            percentageBaseMinor: 0,
+            percentageThousandths: 0,
           },
         ],
         taxes: [],
       };
   view = "editor";
   renderEditor();
+}
+
+function percentageLine(category) {
+  return {
+    description:
+      category === "Sponsorship"
+        ? "KO Reps sponsorship commission"
+        : "KO Reps purse commission",
+    quantity: "1",
+    rateMinor: 0,
+    category,
+    serviceId: "",
+    pricingType: "percentage",
+    percentageBaseMinor: 0,
+    percentageThousandths: 0,
+  };
+}
+
+function recalculatePercentageLine(line) {
+  line.quantity = "1";
+  line.rateMinor = Math.round(
+    ((line.percentageBaseMinor ?? 0) *
+      (line.percentageThousandths ?? 0)) /
+      100000,
+  );
+}
+
+function invoiceLine(line, index) {
+  const percentage = line.pricingType === "percentage";
+  const serviceOptions = data.services
+    .filter((service) => service.currency === editor.currency)
+    .map(
+      (service) =>
+        `<option value="${service.id}" ${service.id === line.serviceId ? "selected" : ""}>${escapeHtml(service.name)} — ${escapeHtml(servicePrice(service))}</option>`,
+    )
+    .join("");
+  return `<div class="line-row ${percentage ? "percentage-line" : ""}"><label class="service-picker">Saved service<select data-line="${index}" data-field="serviceId"><option value="">Choose a service…</option>${serviceOptions}</select></label><label class="description-field">Description on invoice<input data-line="${index}" data-field="description" value="${escapeHtml(line.description)}" required /></label><label>Revenue type<select data-line="${index}" data-field="category">${categoryOptions(line.category ?? "Other")}</select></label>${percentage ? `<label>Fighter's ${line.category === "Purse Percentage" ? "purse" : "sponsorship"} amount (${editor.currency})<input data-line="${index}" data-field="percentageBase" value="${((line.percentageBaseMinor ?? 0) / 100).toFixed(2)}" inputmode="decimal" required /></label><label>KO Reps %<input data-line="${index}" data-field="percentage" type="number" min="0" max="100" step="0.001" value="${formatPercentage(line.percentageThousandths)}" required /></label><div class="calculated-fee"><span>Calculated fee</span><strong data-calculated-line="${index}">${money(line.rateMinor, editor.currency)}</strong></div>` : `<label>Quantity<input data-line="${index}" data-field="quantity" value="${escapeHtml(line.quantity)}" inputmode="decimal" required /></label><label>Rate (${editor.currency})<input data-line="${index}" data-field="rate" value="${(line.rateMinor / 100).toFixed(2)}" inputmode="decimal" required /></label>`}${editor.lines.length > 1 ? `<button type="button" class="remove" data-remove-line="${index}" aria-label="Remove service">×</button>` : ""}</div>`;
 }
 
 function editorTotals() {
@@ -475,7 +534,7 @@ function editorTotals() {
 function renderEditor() {
   const totals = editorTotals();
   shell(
-    `<section class="composer"><div class="composer-title"><div><p class="kicker">Draft - nothing is sent</p><h1>${editor.id ? "Edit your draft" : "Create an invoice"}</h1><p>Complete four short sections, then save and review.</p></div><div class="total-box"><small>Invoice total</small><strong id="live-total">${money(totals.total, editor.currency)}</strong></div></div><form id="invoice-form"><section class="form-section"><span class="number">1</span><div><h2>Who is this for?</h2><div class="grid"><label class="wide">Client<select name="clientId">${data.clients.map((client) => `<option value="${client.id}" ${client.id === editor.clientId ? "selected" : ""}>${escapeHtml(client.name)}${client.company ? ` - ${escapeHtml(client.company)}` : ""}</option>`).join("")}</select></label><label>Currency<select name="currency"><option ${editor.currency === "CAD" ? "selected" : ""}>CAD</option><option ${editor.currency === "USD" ? "selected" : ""}>USD</option></select><small>Never combined or converted.</small></label><label>Invoice date<input name="issueDate" type="date" value="${editor.issueDate}" required /></label><label>Payment due<input name="dueDate" type="date" value="${editor.dueDate}" required /></label></div></div></section><section class="form-section"><span class="number">2</span><div><h2>What are you billing for?</h2><p class="helper">Choose a saved service to fill in its normal description and price. You can still change anything on this invoice.</p><div id="lines">${editor.lines.map((line, index) => `<div class="line-row"><label class="service-picker">Saved service<select data-line="${index}" data-field="serviceId"><option value="">Choose a service…</option>${data.services.filter((service) => service.currency === editor.currency).map((service) => `<option value="${service.id}" ${service.id === line.serviceId ? "selected" : ""}>${escapeHtml(service.name)} — ${money(service.rateMinor, service.currency)}</option>`).join("")}</select></label><label class="description-field">Description on invoice<input data-line="${index}" data-field="description" value="${escapeHtml(line.description)}" required /></label><label>Revenue type<select data-line="${index}" data-field="category">${categoryOptions(line.category ?? "Other")}</select></label><label>Quantity<input data-line="${index}" data-field="quantity" value="${escapeHtml(line.quantity)}" inputmode="decimal" required /></label><label>Rate (${editor.currency})<input data-line="${index}" data-field="rate" value="${(line.rateMinor / 100).toFixed(2)}" inputmode="decimal" required /></label>${editor.lines.length > 1 ? `<button type="button" class="remove" data-remove-line="${index}" aria-label="Remove service">×</button>` : ""}</div>`).join("")}</div><div class="invoice-shortcuts"><button type="button" class="text-button" id="add-line">+ Add another service</button><button type="button" class="secondary" data-add-percentage="Commission">Calculate percentage fee</button></div></div></section><section class="form-section"><span class="number">3</span><div><h2>Is this invoice taxable in Québec?</h2><p class="helper">Choose the green button for the normal Québec GST and QST. Leave this section empty for a non-taxable invoice.</p><div id="taxes">${editor.taxes.map((tax, index) => `<div class="tax-row"><label>Tax label<input data-tax="${index}" data-field="label" value="${escapeHtml(tax.label)}" required /></label><label>Rate %<input data-tax="${index}" data-field="rate" type="number" min="0" max="100" step="0.001" value="${(tax.rateThousandths / 1000).toFixed(3).replace(/\.?0+$/, "")}" required /></label><button type="button" class="remove" data-remove-tax="${index}" aria-label="Remove tax">×</button></div>`).join("")}</div><div class="tax-actions"><button type="button" class="primary" id="add-quebec-tax">Yes — add GST + QST</button><button type="button" class="text-button" id="add-tax">Add a different tax</button></div></div></section><section class="form-section"><span class="number">4</span><div><h2>Final notes</h2><div class="grid"><label>Payment terms<textarea name="terms">${escapeHtml(editor.terms)}</textarea></label><label>Note on invoice<textarea name="notes">${escapeHtml(editor.notes)}</textarea></label></div></div></section><footer class="form-footer"><button type="button" class="secondary" id="cancel-editor">Cancel</button><span>This only saves a draft. Nothing is sent.</span><button class="primary large">Save draft and review →</button></footer></form></section>`,
+    `<section class="composer"><div class="composer-title"><div><p class="kicker">Draft - nothing is sent</p><h1>${editor.id ? "Edit your draft" : "Create an invoice"}</h1><p>Complete four short sections, then save and review.</p></div><div class="total-box"><small>Invoice total</small><strong id="live-total">${money(totals.total, editor.currency)}</strong></div></div><form id="invoice-form"><section class="form-section"><span class="number">1</span><div><h2>Who is this for?</h2><div class="grid"><label class="wide">Client<select name="clientId">${data.clients.map((client) => `<option value="${client.id}" ${client.id === editor.clientId ? "selected" : ""}>${escapeHtml(client.name)}${client.company ? ` - ${escapeHtml(client.company)}` : ""}</option>`).join("")}</select></label><label>Currency<select name="currency"><option ${editor.currency === "CAD" ? "selected" : ""}>CAD</option><option ${editor.currency === "USD" ? "selected" : ""}>USD</option></select><small>Never combined or converted.</small></label><label>Invoice date<input name="issueDate" type="date" value="${editor.issueDate}" required /></label><label>Payment due<input name="dueDate" type="date" value="${editor.dueDate}" required /></label></div></div></section><section class="form-section"><span class="number">2</span><div><h2>What are you billing for?</h2><p class="helper">Choose a saved service to fill in its normal description and price. For sponsorship and purse fees, enter the fighter's amount and KO Reps' percentage—the fee calculates for you.</p><div id="lines">${editor.lines.map(invoiceLine).join("")}</div><div class="invoice-shortcuts"><button type="button" class="text-button" id="add-line">+ Add another service</button><button type="button" class="secondary" data-add-percentage="Sponsorship">+ Sponsorship percentage</button><button type="button" class="secondary" data-add-percentage="Purse Percentage">+ Purse percentage</button></div></div></section><section class="form-section"><span class="number">3</span><div><h2>Is this invoice taxable in Québec?</h2><p class="helper">Choose the green button for the normal Québec GST and QST. Leave this section empty for a non-taxable invoice.</p><div id="taxes">${editor.taxes.map((tax, index) => `<div class="tax-row"><label>Tax label<input data-tax="${index}" data-field="label" value="${escapeHtml(tax.label)}" required /></label><label>Rate %<input data-tax="${index}" data-field="rate" type="number" min="0" max="100" step="0.001" value="${(tax.rateThousandths / 1000).toFixed(3).replace(/\.?0+$/, "")}" required /></label><button type="button" class="remove" data-remove-tax="${index}" aria-label="Remove tax">×</button></div>`).join("")}</div><div class="tax-actions"><button type="button" class="primary" id="add-quebec-tax">Yes — add GST + QST</button><button type="button" class="text-button" id="add-tax">Add a different tax</button></div></div></section><section class="form-section"><span class="number">4</span><div><h2>Final notes</h2><div class="grid"><label>Payment terms<textarea name="terms">${escapeHtml(editor.terms)}</textarea></label><label>Note on invoice<textarea name="notes">${escapeHtml(editor.notes)}</textarea></label></div></div></section><footer class="form-footer"><button type="button" class="secondary" id="cancel-editor">Cancel</button><span>This only saves a draft. Nothing is sent.</span><button class="primary large">Save draft and review →</button></footer></form></section>`,
   );
   bindEditor();
 }
@@ -495,12 +554,48 @@ function bindEditor() {
           line.description = service.description;
           line.rateMinor = service.rateMinor;
           line.category = service.category;
+          line.pricingType = service.pricingType ?? "fixed";
+          line.percentageBaseMinor = 0;
+          line.percentageThousandths =
+            service.percentageThousandths ?? 0;
+          if (line.pricingType === "percentage")
+            recalculatePercentageLine(line);
         }
         renderEditor();
         return;
-      } else if (target.dataset.field === "rate")
+      } else if (target.dataset.field === "rate") {
         line.rateMinor = Math.max(0, minor(target.value));
-      else line[target.dataset.field] = target.value;
+      } else if (target.dataset.field === "percentageBase") {
+        line.percentageBaseMinor = Math.max(0, minor(target.value));
+        recalculatePercentageLine(line);
+      } else if (target.dataset.field === "percentage") {
+        line.percentageThousandths = Math.max(
+          0,
+          percentageThousandths(target.value),
+        );
+        recalculatePercentageLine(line);
+      } else if (target.dataset.field === "category") {
+        line.category = target.value;
+        const percentageCategory = [
+          "Sponsorship",
+          "Purse Percentage",
+        ].includes(target.value);
+        if (percentageCategory !== (line.pricingType === "percentage")) {
+          line.pricingType = percentageCategory ? "percentage" : "fixed";
+          line.quantity = "1";
+          line.rateMinor = 0;
+          line.percentageBaseMinor = 0;
+          line.percentageThousandths = 0;
+          renderEditor();
+          return;
+        }
+      } else line[target.dataset.field] = target.value;
+
+      const calculated = document.querySelector(
+        `[data-calculated-line="${target.dataset.line}"]`,
+      );
+      if (calculated)
+        calculated.textContent = money(line.rateMinor, editor.currency);
     }
     if (target.dataset.tax !== undefined) {
       const tax = editor.taxes[Number(target.dataset.tax)];
@@ -548,34 +643,15 @@ function bindEditor() {
       rateMinor: 0,
       category: "Other",
       serviceId: "",
+      pricingType: "fixed",
+      percentageBaseMinor: 0,
+      percentageThousandths: 0,
     });
     renderEditor();
   });
   document.querySelectorAll("[data-add-percentage]").forEach((button) =>
     button.addEventListener("click", () => {
-      const base = prompt(
-        "Enter the amount the percentage is based on",
-        "0.00",
-      );
-      if (base === null || minor(base) < 0)
-        return alert("Enter a valid total amount.");
-      const percent = prompt("Enter the percentage fee", "10");
-      if (
-        percent === null ||
-        !/^\d+(?:\.\d{1,3})?$/.test(percent.trim()) ||
-        Number(percent) > 100
-      )
-        return alert("Enter a valid percentage from 0 to 100.");
-      const amountMinor = Math.round((minor(base) * Number(percent)) / 100);
-      const category = "Commission";
-      const description = `Percentage fee (${percent.trim()}%)`;
-      const line = {
-        description,
-        quantity: "1",
-        rateMinor: amountMinor,
-        category,
-        serviceId: "",
-      };
+      const line = percentageLine(button.dataset.addPercentage);
       if (
         editor.lines.length === 1 &&
         !editor.lines[0].description &&
@@ -700,16 +776,44 @@ function campaignsScreen() {
 
 function servicesScreen() {
   const editing = data.services.find((service) => service.id === serviceEditorId);
-  shell(
-    `<section class="simple"><p class="kicker">Saved menu · ${data.services.length} services</p><h1>Services &amp; prices</h1><p>Save a service once. Choosing it on an invoice fills in the normal description, category, and price automatically.</p><div class="two-column"><form class="card-form" id="service-form"><h2>${editing ? "Edit service" : "Add a service"}</h2><label>Short service name<input name="name" value="${escapeHtml(editing?.name ?? "")}" placeholder="Example: Consulting session" required /></label><label>Description shown on invoice<textarea name="description" required>${escapeHtml(editing?.description ?? "")}</textarea></label><label>Revenue type<select name="category">${categoryOptions(editing?.category ?? "Services")}</select></label><div class="grid"><label>Currency<select name="currency"><option ${editing?.currency !== "USD" ? "selected" : ""}>CAD</option><option ${editing?.currency === "USD" ? "selected" : ""}>USD</option></select></label><label>Normal price<input name="rate" inputmode="decimal" value="${editing ? (editing.rateMinor / 100).toFixed(2) : ""}" placeholder="0.00" required /></label></div><div class="form-buttons">${editing ? `<button type="button" class="secondary" id="cancel-service-edit">Cancel</button>` : ""}<button class="primary">${editing ? "Save changes" : "+ Save service"}</button></div></form><div class="service-list">${revenueCategories.map((category) => { const services = data.services.filter((service) => service.category === category); return services.length ? `<section><h2>${escapeHtml(category)}</h2>${services.map((service) => `<article><div><h3>${escapeHtml(service.name)}</h3><p>${escapeHtml(service.description)}</p></div><b>${money(service.rateMinor, service.currency)}</b><button class="secondary" data-edit-service="${service.id}">Edit</button></article>`).join("")}</section>` : ""; }).join("") || `<div class="empty"><h3>No saved services yet</h3><p>Add the services you use most often.</p></div>`}</div></div></section>`,
+  const usesPercentage = ["Sponsorship", "Purse Percentage"].includes(
+    editing?.category,
   );
+  shell(
+    `<section class="simple"><p class="kicker">Saved menu · ${data.services.length} services</p><h1>Services &amp; prices</h1><p>Save a service once. Choosing it on an invoice fills in the normal description, category, and price automatically.</p>${editing ? `<button type="button" class="service-edit-backdrop" id="cancel-service-backdrop" aria-label="Close service editor"></button>` : ""}<div class="two-column"><form class="card-form ${editing ? "service-editor-modal" : ""}" id="service-form" ${editing ? `role="dialog" aria-modal="true" aria-label="Edit ${escapeHtml(editing.name)}"` : ""}><h2>${editing ? `Edit ${escapeHtml(editing.name)}` : "Add a service"}</h2><label>Short service name<input name="name" value="${escapeHtml(editing?.name ?? "")}" placeholder="Example: Consulting session" required /></label><label>Description shown on invoice<textarea name="description" required>${escapeHtml(editing?.description ?? "")}</textarea></label><label>Revenue type<select name="category" id="service-category">${categoryOptions(editing?.category ?? "Services")}</select></label><div class="grid"><label>Currency<select name="currency"><option ${editing?.currency !== "USD" ? "selected" : ""}>CAD</option><option ${editing?.currency === "USD" ? "selected" : ""}>USD</option></select></label><label data-fixed-price ${usesPercentage ? "hidden" : ""}>Normal price<input name="rate" inputmode="decimal" value="${editing && !usesPercentage ? (editing.rateMinor / 100).toFixed(2) : ""}" placeholder="0.00" ${usesPercentage ? "" : "required"} /></label><label data-percentage-price ${usesPercentage ? "" : "hidden"}>Default KO Reps % <small>can be changed on each invoice</small><input name="percentage" type="number" min="0" max="100" step="0.001" value="${editing && usesPercentage ? formatPercentage(editing.percentageThousandths) : ""}" placeholder="Example: 10" /></label></div><div class="form-buttons">${editing ? `<button type="button" class="secondary" id="cancel-service-edit">Cancel</button>` : ""}<button class="primary">${editing ? "Save changes" : "+ Save service"}</button></div></form><div class="service-list">${revenueCategories.map((category) => { const services = data.services.filter((service) => service.category === category); return services.length ? `<section><h2>${escapeHtml(category)}</h2>${services.map((service) => `<article><div><h3>${escapeHtml(service.name)}</h3><p>${escapeHtml(service.description)}</p></div><b>${escapeHtml(servicePrice(service))}</b><button class="secondary" data-edit-service="${service.id}">Edit</button></article>`).join("")}</section>` : ""; }).join("") || `<div class="empty"><h3>No saved services yet</h3><p>Add the services you use most often.</p></div>`}</div></div></section>`,
+  );
+  const category = document.querySelector("#service-category");
+  const syncPricingFields = () => {
+    const percentage = ["Sponsorship", "Purse Percentage"].includes(
+      category.value,
+    );
+    const fixedLabel = document.querySelector("[data-fixed-price]");
+    const percentageLabel = document.querySelector("[data-percentage-price]");
+    fixedLabel.hidden = percentage;
+    percentageLabel.hidden = !percentage;
+    fixedLabel.querySelector("input").required = !percentage;
+  };
+  category.addEventListener("change", syncPricingFields);
   document.querySelector("#service-form").addEventListener("submit", (event) => {
     event.preventDefault();
     const values = Object.fromEntries(new FormData(event.currentTarget));
-    const rateMinor = minor(values.rate);
-    if (rateMinor < 0) return alert("Enter a valid price.");
+    const percentage = ["Sponsorship", "Purse Percentage"].includes(
+      values.category,
+    );
+    if (percentage) {
+      const parsed = values.percentage
+        ? percentageThousandths(values.percentage)
+        : 0;
+      if (parsed < 0) return alert("Enter a valid percentage from 0 to 100.");
+      values.percentageThousandths = parsed;
+      values.rateMinor = 0;
+    } else {
+      const rateMinor = minor(values.rate);
+      if (rateMinor < 0) return alert("Enter a valid price.");
+      values.rateMinor = rateMinor;
+    }
     delete values.rate;
-    values.rateMinor = rateMinor;
+    delete values.percentage;
     action(
       {
         action: "save-service",
@@ -724,13 +828,19 @@ function servicesScreen() {
     button.addEventListener("click", () => {
       serviceEditorId = button.dataset.editService;
       render();
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      document.querySelector("#service-form input[name='name']")?.select();
     }),
   );
-  document.querySelector("#cancel-service-edit")?.addEventListener("click", () => {
+  const cancelEditing = () => {
     serviceEditorId = null;
     render();
-  });
+  };
+  document
+    .querySelector("#cancel-service-edit")
+    ?.addEventListener("click", cancelEditing);
+  document
+    .querySelector("#cancel-service-backdrop")
+    ?.addEventListener("click", cancelEditing);
 }
 
 function settingsScreen() {

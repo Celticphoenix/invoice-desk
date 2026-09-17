@@ -60,6 +60,8 @@ function migrate(db) {
       id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
       category TEXT NOT NULL, currency TEXT NOT NULL CHECK(currency IN ('CAD','USD')),
       rate_minor INTEGER NOT NULL CHECK(rate_minor >= 0), active INTEGER NOT NULL DEFAULT 1,
+      pricing_type TEXT NOT NULL DEFAULT 'fixed' CHECK(pricing_type IN ('fixed','percentage')),
+      percentage_thousandths INTEGER NOT NULL DEFAULT 0 CHECK(percentage_thousandths BETWEEN 0 AND 100000),
       source_key TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS invoices(
@@ -316,6 +318,25 @@ function migrate(db) {
     `);
     db.prepare("INSERT INTO schema_migrations VALUES (7, ?)").run(now());
   }
+  if (
+    !db.prepare("SELECT version FROM schema_migrations WHERE version=8").get()
+  ) {
+    const serviceColumns = new Set(
+      db.prepare("PRAGMA table_info(services)").all().map((row) => row.name),
+    );
+    if (!serviceColumns.has("pricing_type"))
+      db.exec(
+        "ALTER TABLE services ADD COLUMN pricing_type TEXT NOT NULL DEFAULT 'fixed' CHECK(pricing_type IN ('fixed','percentage'))",
+      );
+    if (!serviceColumns.has("percentage_thousandths"))
+      db.exec(
+        "ALTER TABLE services ADD COLUMN percentage_thousandths INTEGER NOT NULL DEFAULT 0 CHECK(percentage_thousandths BETWEEN 0 AND 100000)",
+      );
+    db.prepare(
+      "UPDATE services SET pricing_type='percentage' WHERE category IN ('Sponsorship','Purse Percentage')",
+    ).run();
+    db.prepare("INSERT INTO schema_migrations VALUES (8, ?)").run(now());
+  }
 }
 
 function problem(status, message) {
@@ -385,8 +406,23 @@ export function calculate(lines, taxes) {
   if (!Array.isArray(lines) || lines.length < 1 || lines.length > 100)
     throw problem(400, "Add at least one service");
   const calculatedLines = lines.map((line) => {
-    const quantity = parseQuantity(line.quantity);
-    const rateMinor = integer(line.rateMinor, "Rate", 0, 10_000_000_000);
+    const pricingType = line.pricingType === "percentage" ? "percentage" : "fixed";
+    const quantity = parseQuantity(pricingType === "percentage" ? "1" : line.quantity);
+    const percentageBaseMinor =
+      pricingType === "percentage"
+        ? integer(line.percentageBaseMinor, "Percentage base", 0, 10_000_000_000)
+        : 0;
+    const percentageThousandths =
+      pricingType === "percentage"
+        ? integer(line.percentageThousandths, "Percentage", 0, 100000)
+        : 0;
+    const rateMinor =
+      pricingType === "percentage"
+        ? roundRatio(
+            BigInt(percentageBaseMinor) * BigInt(percentageThousandths),
+            100000n,
+          )
+        : integer(line.rateMinor, "Rate", 0, 10_000_000_000);
     const category = text(
       line.category ?? "Other",
       "Revenue category",
@@ -395,6 +431,10 @@ export function calculate(lines, taxes) {
     );
     if (
       ![
+        "Medical Services",
+        "Fighter Management",
+        "Sponsorship",
+        "Purse Percentage",
         "Services",
         "Products",
         "Consulting",
@@ -403,7 +443,7 @@ export function calculate(lines, taxes) {
       ].includes(category)
     )
       throw problem(400, "Revenue category is invalid");
-    return {
+    const calculated = {
       description: text(line.description, "Service description", 500, true),
       quantity: quantity.clean,
       rateMinor,
@@ -411,6 +451,13 @@ export function calculate(lines, taxes) {
       serviceId: text(line.serviceId ?? "", "Saved service", 100),
       amountMinor: roundRatio(quantity.scaled * BigInt(rateMinor), 10000n),
     };
+    if (pricingType === "percentage")
+      Object.assign(calculated, {
+        pricingType,
+        percentageBaseMinor,
+        percentageThousandths,
+      });
+    return calculated;
   });
   if (!Array.isArray(taxes) || taxes.length > 10)
     throw problem(400, "Too many tax lines");
@@ -507,6 +554,8 @@ function serviceView(row) {
     category: row.category,
     currency: row.currency,
     rateMinor: Number(row.rate_minor),
+    pricingType: row.pricing_type ?? "fixed",
+    percentageThousandths: Number(row.percentage_thousandths ?? 0),
     active: Boolean(row.active),
   };
 }
@@ -805,12 +854,35 @@ export function saveService(input, id) {
     : null;
   if (id && !existing) throw problem(404, "Service not found");
   const timestamp = now();
+  const category = text(
+    input.category ?? "Other",
+    "Revenue category",
+    80,
+    true,
+  );
+  const percentageCategory = ["Sponsorship", "Purse Percentage"].includes(
+    category,
+  );
+  const pricingType = percentageCategory ? "percentage" : "fixed";
   const value = {
     name: text(input.name, "Service name", 160, true),
     description: text(input.description ?? input.name, "Description", 500, true),
-    category: text(input.category ?? "Other", "Revenue category", 80, true),
+    category,
     currency: currency(input.currency ?? "CAD"),
-    rateMinor: integer(input.rateMinor, "Rate", 0, 10_000_000_000),
+    rateMinor:
+      pricingType === "fixed"
+        ? integer(input.rateMinor, "Rate", 0, 10_000_000_000)
+        : 0,
+    pricingType,
+    percentageThousandths:
+      pricingType === "percentage"
+        ? integer(
+            input.percentageThousandths ?? 0,
+            "Percentage",
+            0,
+            100000,
+          )
+        : 0,
     sourceKey: text(
       input.sourceKey ?? existing?.source_key ?? "",
       "Source key",
@@ -819,6 +891,10 @@ export function saveService(input, id) {
   };
   if (
     ![
+      "Medical Services",
+      "Fighter Management",
+      "Sponsorship",
+      "Purse Percentage",
       "Services",
       "Products",
       "Consulting",
@@ -829,13 +905,15 @@ export function saveService(input, id) {
     throw problem(400, "Revenue category is invalid");
   if (id) {
     db.prepare(
-      "UPDATE services SET name=?,description=?,category=?,currency=?,rate_minor=?,source_key=?,updated_at=? WHERE id=?",
+      "UPDATE services SET name=?,description=?,category=?,currency=?,rate_minor=?,pricing_type=?,percentage_thousandths=?,source_key=?,updated_at=? WHERE id=?",
     ).run(
       value.name,
       value.description,
       value.category,
       value.currency,
       value.rateMinor,
+      value.pricingType,
+      value.percentageThousandths,
       value.sourceKey,
       timestamp,
       serviceId,
@@ -843,7 +921,7 @@ export function saveService(input, id) {
     audit(db, "service", serviceId, "updated", { name: value.name });
   } else {
     db.prepare(
-      "INSERT INTO services(id,name,description,category,currency,rate_minor,active,source_key,created_at,updated_at) VALUES (?,?,?,?,?,?,1,?,?,?)",
+      "INSERT INTO services(id,name,description,category,currency,rate_minor,active,pricing_type,percentage_thousandths,source_key,created_at,updated_at) VALUES (?,?,?,?,?,?,1,?,?,?,?,?)",
     ).run(
       serviceId,
       value.name,
@@ -851,6 +929,8 @@ export function saveService(input, id) {
       value.category,
       value.currency,
       value.rateMinor,
+      value.pricingType,
+      value.percentageThousandths,
       value.sourceKey,
       timestamp,
       timestamp,
@@ -1050,7 +1130,10 @@ function makePdf(snapshot) {
     { text: "", size: 10 },
     { text: "Services", size: 13 },
     ...snapshot.lines.map((line) => ({
-      text: `${line.description}   ${line.quantity} x ${money(line.rateMinor)}   ${money(line.amountMinor)}`,
+      text:
+        line.pricingType === "percentage"
+          ? `${line.description}   ${(line.percentageThousandths / 1000).toFixed(3).replace(/\.?0+$/, "")}% of ${money(line.percentageBaseMinor)}   ${money(line.amountMinor)}`
+          : `${line.description}   ${line.quantity} x ${money(line.rateMinor)}   ${money(line.amountMinor)}`,
       size: 10,
     })),
     { text: "", size: 10 },
