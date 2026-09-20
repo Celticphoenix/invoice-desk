@@ -411,8 +411,31 @@ nav button.active {
 .invoice-buttons {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: 16px;
+}
+.void-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  align-items: end;
+  gap: 10px 14px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid #ead2cf;
+  border-radius: 11px;
+  background: #fff8f7;
+}
+.void-form label {
+  display: grid;
+  gap: 6px;
+  color: #6e413d;
+  font-size: 12px;
+  font-weight: 750;
+}
+.void-form small {
+  grid-column: 1 / -1;
+  color: #766b67;
 }
 .payment-form {
   display: grid;

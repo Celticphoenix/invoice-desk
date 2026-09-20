@@ -224,7 +224,7 @@ function invoiceCards(invoices) {
           : `<a class="secondary" href="/api/pdf/${invoice.id}">Download PDF</a><button class="secondary" data-duplicate="${invoice.id}">Make another like this</button>${emailRecord?.status === "provider_accepted" ? "" : `<button class="primary" data-review-send="${invoice.id}">${sendLabel}</button>`}`;
       const voidAction =
         invoice.state === "issued" && invoice.paymentsMinor === 0
-          ? `<button class="danger-link" data-void="${invoice.id}">Void and make replacement</button>`
+          ? `<form class="void-form" data-void="${invoice.id}"><label>Why are you voiding it?<input name="reason" placeholder="Example: test invoice or wrong amount" required /></label><button class="danger-link">Void invoice and make replacement</button><small>The original stays in the audit trail and its Stripe link is disabled.</small></form>`
           : "";
       const payment =
         invoice.state === "issued" && invoice.balanceMinor > 0
@@ -242,7 +242,7 @@ function invoiceCards(invoices) {
       const emailStatus = emailRecord
         ? `<div class="email-box ${emailRecord.status}"><div><b>${emailRecord.status === "provider_accepted" ? "Gmail accepted this email" : emailRecord.status === "failed" ? "Email needs attention" : "Email preview ready"}</b><span>To ${escapeHtml(emailRecord.recipientEmail)}${emailRecord.acceptedAt ? ` · ${escapeHtml(emailRecord.acceptedAt.slice(0, 10))}` : ""}</span></div>${emailRecord.status === "failed" ? `<button class="primary" data-retry-email="${emailRecord.id}">Retry email</button>` : emailRecord.status === "preview" ? `<details><summary>Read preview</summary><pre>${escapeHtml(emailRecord.bodyText)}</pre></details>` : ""}</div>`
         : "";
-      return `<article class="invoice-card"><div class="invoice-main"><div><span class="badge ${kind}">${label}</span><h3>${escapeHtml(invoice.invoiceNumber ?? "Unnumbered draft")}</h3><p>${escapeHtml(invoice.clientName)} · Due ${escapeHtml(invoice.dueDate)}</p></div><div class="amount"><strong>${money(invoice.totalMinor, invoice.currency)}</strong><span>${invoice.state === "issued" ? `${money(invoice.balanceMinor, invoice.currency)} remaining` : invoice.currency}</span></div></div><div class="invoice-buttons">${draftActions}${voidAction}</div>${emailStatus}${stripeControls}${payment}${invoice.voidReason ? `<p class="void-note">Reason: ${escapeHtml(invoice.voidReason)}</p>` : ""}</article>`;
+      return `<article class="invoice-card"><div class="invoice-main"><div><span class="badge ${kind}">${label}</span><h3>${escapeHtml(invoice.invoiceNumber ?? "Unnumbered draft")}</h3><p>${escapeHtml(invoice.clientName)} · Due ${escapeHtml(invoice.dueDate)}</p></div><div class="amount"><strong>${money(invoice.totalMinor, invoice.currency)}</strong><span>${invoice.state === "issued" ? `${money(invoice.balanceMinor, invoice.currency)} remaining` : invoice.currency}</span></div></div><div class="invoice-buttons">${draftActions}</div>${voidAction}${emailStatus}${stripeControls}${payment}${invoice.voidReason ? `<p class="void-note">Reason: ${escapeHtml(invoice.voidReason)}</p>` : ""}</article>`;
     })
     .join("");
 }
@@ -319,14 +319,15 @@ function bindInvoiceActions() {
       ),
     ),
   );
-  document.querySelectorAll("[data-void]").forEach((button) =>
-    button.addEventListener("click", () => {
-      const reason = prompt("Why are you voiding this unpaid invoice?");
-      if (reason)
-        action(
-          { action: "void-reissue", invoiceId: button.dataset.void, reason },
-          "Original voided. A linked replacement draft is ready.",
-        );
+  document.querySelectorAll("[data-void]").forEach((form) =>
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const reason = String(new FormData(form).get("reason") ?? "").trim();
+      if (!reason) return;
+      action(
+        { action: "void-reissue", invoiceId: form.dataset.void, reason },
+        "Original voided, its Stripe link disabled, and a linked replacement draft is ready.",
+      );
     }),
   );
   document.querySelectorAll("[data-payment]").forEach((form) =>

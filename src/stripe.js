@@ -127,6 +127,13 @@ export async function retrieveCheckoutSession(sessionId) {
   );
 }
 
+export async function expireCheckoutSession(sessionId) {
+  return stripeRequest(
+    `/v1/checkout/sessions/${encodeURIComponent(sessionId)}/expire`,
+    { method: "POST" },
+  );
+}
+
 export function verifyStripeWebhook(rawBody, signatureHeader) {
   const secret = clean(process.env.STRIPE_WEBHOOK_SECRET);
   if (!secret.startsWith("whsec_"))

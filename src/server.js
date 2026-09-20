@@ -48,6 +48,7 @@ import {
 } from "./email.js";
 import {
   createCheckoutSession,
+  expireCheckoutSession,
   retrieveCheckoutSession,
   stripeStatus,
   verifyStripeWebhook,
@@ -233,6 +234,19 @@ async function createStripePayment(invoiceId) {
   } finally {
     stripeCreations.delete(invoiceId);
   }
+}
+
+async function voidInvoice(invoiceId, reason) {
+  const checkout = reusableStripeSession(invoiceId);
+  if (checkout) {
+    const expired = await expireCheckoutSession(checkout.id);
+    if (expired.status !== "expired")
+      throw Object.assign(new Error("Stripe payment link could not be disabled"), {
+        status: 502,
+      });
+    updateStripeSessionStatus(checkout.id, "expired");
+  }
+  return voidAndReissue(invoiceId, reason);
 }
 
 async function sendOutbox(outboxId) {
@@ -465,7 +479,7 @@ const server = createServer(async (request, response) => {
         issue: () => issueInvoice(input.invoiceId),
         "record-payment": () => recordPayment(input.payment),
         "correct-payment": () => correctPayment(input.correction),
-        "void-reissue": () => voidAndReissue(input.invoiceId, input.reason),
+        "void-reissue": () => voidInvoice(input.invoiceId, input.reason),
         "stripe-create": () => createStripePayment(input.invoiceId),
         "stripe-sync": () => syncStripePayments(),
         duplicate: () => duplicateInvoice(input.invoiceId),

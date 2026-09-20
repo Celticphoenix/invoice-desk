@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { afterEach, beforeEach, test } from "node:test";
 import {
   createCheckoutSession,
+  expireCheckoutSession,
   retrieveCheckoutSession,
   stripeStatus,
   verifyStripeWebhook,
@@ -81,6 +82,12 @@ test("creates exact Stripe Checkout Sessions without exposing the key", async ()
     (await retrieveCheckoutSession("cs_test_exact_invoice")).payment_status,
     "paid",
   );
+  await expireCheckoutSession("cs_test_exact_invoice");
+  assert.equal(
+    requests.at(-1).url,
+    "/v1/checkout/sessions/cs_test_exact_invoice/expire",
+  );
+  assert.equal(requests.at(-1).method, "POST");
 });
 
 test("verifies signed webhook raw bodies", () => {
