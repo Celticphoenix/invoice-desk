@@ -334,8 +334,12 @@ function sameOrigin(request) {
 
 const staticFiles = {
   "/": ["index.html", "text/html; charset=utf-8"],
+  "/about": ["about.html", "text/html; charset=utf-8"],
+  "/privacy": ["privacy.html", "text/html; charset=utf-8"],
+  "/terms": ["terms.html", "text/html; charset=utf-8"],
   "/app.js": ["app.js", "text/javascript; charset=utf-8"],
   "/styles.css": ["styles.css", "text/css; charset=utf-8"],
+  "/public-info.css": ["public-info.css", "text/css; charset=utf-8"],
 };
 
 const server = createServer(async (request, response) => {
