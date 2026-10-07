@@ -399,6 +399,16 @@ function htmlEscape(value) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
 }
 
+const customerPaymentHeaders = {
+  ...securityHeaders,
+  // A no-referrer policy makes browser form POSTs send Origin: null.
+  // Keep the origin for our own form, but never leak the token to Stripe.
+  "Referrer-Policy": "same-origin",
+  "Content-Security-Policy": securityHeaders["Content-Security-Policy"].replace(
+    "form-action 'self'", "form-action 'self' https://checkout.stripe.com",
+  ),
+};
+
 function paymentPage(response, status, title, message, invoice = null, paymentPath = "") {
   const amount = invoice ? new Intl.NumberFormat("en-CA", {
     style: "currency", currency: invoice.currency,
@@ -407,7 +417,7 @@ function paymentPage(response, status, title, message, invoice = null, paymentPa
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "private, no-store",
     "X-Robots-Tag": "noindex, nofollow, noarchive",
-    ...securityHeaders,
+    ...customerPaymentHeaders,
   });
   response.end(`<!doctype html><html lang="en"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -445,7 +455,7 @@ async function customerPayment(request, response, url, token) {
       return paymentPage(response, 200, "Pay your invoice", "This invoice link stays usable even when a temporary Stripe checkout expires.", invoice, url.pathname);
     }
     const checkout = await createStripePayment(invoice.id);
-    response.writeHead(303, { Location: checkout.url, "Cache-Control": "no-store", ...securityHeaders });
+    response.writeHead(303, { Location: checkout.url, "Cache-Control": "no-store", ...customerPaymentHeaders });
     return response.end();
   } catch (error) {
     invoice = payableInvoice(invoice.id);

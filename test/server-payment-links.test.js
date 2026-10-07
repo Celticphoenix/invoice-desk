@@ -122,7 +122,8 @@ test("durable invoice links renew expired checkout and block duplicate or void p
     assert.equal(landing.status, 200);
     assert.equal(landing.headers.get("x-robots-tag"), "noindex, nofollow, noarchive");
     assert.match(landing.headers.get("cache-control"), /no-store/);
-    assert.equal(landing.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(landing.headers.get("referrer-policy"), "same-origin");
+    assert.match(landing.headers.get("content-security-policy"), /form-action 'self' https:\/\/checkout\.stripe\.com;/);
     const text = await landing.text();
     assert.match(text, /143\.72/);
     assert.match(text, /Continue to secure payment/);
@@ -132,9 +133,11 @@ test("durable invoice links renew expired checkout and block duplicate or void p
     assert.equal((await open(`${origin}/pay/${invoice.id}`)).status, 404);
     const blocked = await fetch(link, { method: "POST", headers: { Origin: "https://attacker.example" } });
     assert.equal(blocked.status, 403);
+    assert.equal((await fetch(link, { method: "POST", headers: { Origin: "null" } })).status, 403);
     assert.equal(creations, 0);
     const first = await pay(link);
     assert.equal(first.status, 303);
+    assert.equal(first.headers.get("referrer-policy"), "same-origin");
     assert.equal(creations, 1);
     assert.equal(sessions.get("cs_test_durable_1").amount_total, 14372);
     assert.equal((await pay(link)).headers.get("location"), first.headers.get("location"));
