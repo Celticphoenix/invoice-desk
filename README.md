@@ -19,7 +19,7 @@ Invoice Desk started as an internal tool for a small professional-management tea
 - Freezes finalized invoice data and saves the exact PDF
 - Duplicates an earlier invoice into a new editable draft
 - Tracks partial, final, Stripe, corrected, and Stripe-refunded payments
-- Creates optional Stripe-hosted Checkout links for the exact unpaid balance
+- Creates reusable invoice payment links that open Stripe Checkout for the exact unpaid balance
 - Sends invoices and PDF attachments through optional send-only Gmail authorization
 - Uses a persistent outbox, safe preview mode, retries, and duplicate-send protection
 - Sends small, selected-client email campaigns as separate messages through Gmail
@@ -69,6 +69,7 @@ The Compose configuration exposes Invoice Desk only on the host's loopback inter
 | `INVOICE_DESK_SESSION_SECRET` | Long random session-signing secret; required in production |
 | `INVOICE_DESK_TOKEN_SECRET` | Long secret used to encrypt a connected Gmail refresh token |
 | `INVOICE_DESK_SECURE_COOKIES` | `true` for HTTPS deployments; local Compose defaults to `false` |
+| `INVOICE_DESK_PUBLIC_URL` | HTTPS origin of this app for customer payment links; defaults to the origin of `GOOGLE_REDIRECT_URI` when configured |
 | `STRIPE_SECRET_KEY` | Optional Stripe test or live secret key |
 | `STRIPE_SUCCESS_URL` | Required HTTPS return page when Stripe is enabled |
 | `STRIPE_CANCEL_URL` | Optional HTTPS cancellation page |
@@ -89,9 +90,28 @@ Never paste Stripe secrets into a client record, invoice, payment instructions, 
 
 The signed webhook endpoint is `POST /api/stripe/webhook`. Subscribe it to
 `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
-`checkout.session.expired`, and `charge.refunded`. Keep all other application
-routes behind authentication. Paid Checkout Sessions are also reconciled when
+`checkout.session.expired`, and `charge.refunded`. Keep internal application
+routes behind authentication. The `/pay/<random-token>` customer payment page
+and its form must be reachable without the shared application password.
+Paid Checkout Sessions are also reconciled when
 the dashboard loads, so refunds remain accurate even if a webhook is delayed.
+
+Set `INVOICE_DESK_PUBLIC_URL` to the HTTPS origin of your Invoice Desk deployment
+(not the business website or a Stripe return page). For hosted Gmail installations,
+the app can use the origin of the configured `GOOGLE_REDIRECT_URI` instead.
+Local development without either value uses the local app origin.
+
+Stripe Checkout Sessions expire after 24 hours by default. The app now emails
+and copies a persistent invoice link instead of the temporary Checkout URL.
+Opening this link shows a minimal invoice payment page; clicking **Continue to
+secure payment** rechecks Stripe and the unpaid balance, reuses an open checkout,
+or creates a fresh one after expiration. Paid and voided invoices cannot start
+another payment. No client contact details, PDFs, notes, or internal records are
+available from this public page. Treat its random token as a private customer link.
+
+Previously sent direct Stripe Checkout links cannot be made permanent. If an old
+link expired, copy the invoice's new **payment link** and send that replacement
+to the customer. Do not create a duplicate invoice or record a payment to fix a link.
 
 ## Gmail delivery
 

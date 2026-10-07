@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -358,6 +358,13 @@ function migrate(db) {
       "CREATE INDEX IF NOT EXISTS stripe_payment_intent_idx ON stripe_sessions(payment_intent_id)",
     );
     db.prepare("INSERT INTO schema_migrations VALUES (9, ?)").run(now());
+  }
+  if (!db.prepare("SELECT version FROM schema_migrations WHERE version=10").get()) {
+    db.exec(`CREATE TABLE IF NOT EXISTS invoice_payment_links(
+      invoice_id TEXT PRIMARY KEY REFERENCES invoices(id),
+      token TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL
+    )`);
+    db.prepare("INSERT INTO schema_migrations VALUES (10, ?)").run(now());
   }
 }
 
@@ -1469,6 +1476,42 @@ export function payableInvoice(invoiceId) {
   return findInvoice(text(invoiceId, "Invoice", 100, true));
 }
 
+export function invoicePaymentPath(invoiceId) {
+  const db = database();
+  const invoice = findInvoice(text(invoiceId, "Invoice", 100, true), db);
+  if (invoice.state !== "issued")
+    throw problem(409, "Only an active invoice can have a payment link");
+  db.prepare(
+    "INSERT OR IGNORE INTO invoice_payment_links(invoice_id,token,created_at) VALUES (?,?,?)",
+  ).run(invoice.id, randomBytes(32).toString("base64url"), now());
+  const row = db.prepare("SELECT token FROM invoice_payment_links WHERE invoice_id=?").get(invoice.id);
+  return `/pay/${row.token}`;
+}
+
+export function invoiceForPaymentToken(token) {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(String(token)))
+    throw problem(404, "Payment link not found");
+  const row = database().prepare("SELECT invoice_id FROM invoice_payment_links WHERE token=?").get(token);
+  if (!row) throw problem(404, "Payment link not found");
+  return payableInvoice(row.invoice_id);
+}
+
+export function invoicePaymentUrl(invoiceId) {
+  const configured = process.env.INVOICE_DESK_PUBLIC_URL || process.env.GOOGLE_REDIRECT_URI;
+  const base = configured || (process.env.NODE_ENV !== "production"
+    ? `http://127.0.0.1:${process.env.PORT || process.env.INVOICE_DESK_PORT || 3210}`
+    : "");
+  let url;
+  try { url = new URL(base); } catch {
+    throw problem(503, "Configure INVOICE_DESK_PUBLIC_URL for customer payment links");
+  }
+  if (url.username || url.password ||
+      (url.protocol !== "https:" && !(process.env.NODE_ENV !== "production" &&
+        url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname))))
+    throw problem(503, "Customer payment links require the application's HTTPS URL");
+  return new URL(invoicePaymentPath(invoiceId), url.origin).toString();
+}
+
 export function reusableStripeSession(invoiceId) {
   const invoice = payableInvoice(invoiceId);
   const session = database()
@@ -1534,13 +1577,14 @@ export function saveStripeSession(invoiceId, stripeSession) {
   return findInvoice(invoice.id, db);
 }
 
-export function stripeSessionsToSync() {
+export function stripeSessionsToSync(invoiceId = "") {
   return database()
     .prepare(
-      "SELECT id,invoice_id,status FROM stripe_sessions WHERE status IN ('open','paid') ORDER BY created_at",
+      "SELECT id,invoice_id,status,amount_minor,currency FROM stripe_sessions WHERE status IN ('open','paid') AND (?='' OR invoice_id=?) ORDER BY created_at",
     )
-    .all()
-    .map((row) => ({ id: row.id, invoiceId: row.invoice_id, status: row.status }));
+    .all(invoiceId, invoiceId)
+    .map((row) => ({ id: row.id, invoiceId: row.invoice_id, status: row.status,
+      amountMinor: Number(row.amount_minor), currency: row.currency }));
 }
 
 export function updateStripeSessionStatus(sessionId, status) {
@@ -1977,8 +2021,9 @@ export function queueInvoiceEmail(invoiceId, mode = "queued") {
     .get(invoice.id);
   if (existing?.status === "provider_accepted") return outboxView(existing);
   const paymentLines = [];
-  if (invoice.stripeCheckout?.url)
-    paymentLines.push(`Pay securely with Stripe: ${invoice.stripeCheckout.url}`);
+  if (invoice.balanceMinor > 0 && (invoice.stripeCheckout?.url ||
+      (process.env.STRIPE_SECRET_KEY && process.env.STRIPE_SUCCESS_URL)))
+    paymentLines.push(`Pay securely with Stripe: ${invoicePaymentUrl(invoice.id)}`);
   if (snapshot.business.etransferEmail)
     paymentLines.push(`Interac e-Transfer: ${snapshot.business.etransferEmail}`);
   if (snapshot.business.paypalFallbackUrl)

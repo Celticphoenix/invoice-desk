@@ -237,8 +237,8 @@ function invoiceCards(invoices) {
           : "";
       const stripeControls =
         invoice.state === "issued" && invoice.balanceMinor > 0
-          ? checkout?.status === "open"
-            ? `<div class="stripe-box preferred"><div><b>Preferred: pay securely with Stripe</b><span>${checkout.livemode ? "LIVE payment" : "TEST payment"} · ${money(checkout.amountMinor, checkout.currency)}</span></div><div class="invoice-buttons"><a class="primary" href="${escapeHtml(checkout.url)}" target="_blank" rel="noreferrer">Open Stripe payment page</a><button class="secondary" data-copy-stripe="${escapeHtml(checkout.url)}">Copy Stripe link</button><button class="text-button" data-stripe-sync>Check payment status</button></div></div>`
+          ? invoice.paymentUrl
+            ? `<div class="stripe-box preferred"><div><b>Preferred: pay securely with Stripe</b><span>Reusable invoice link · ${money(invoice.balanceMinor, invoice.currency)} · opens a fresh checkout when needed</span></div><div class="invoice-buttons"><a class="primary" href="${escapeHtml(invoice.paymentUrl)}" target="_blank" rel="noreferrer">Open payment page</a><button class="secondary" data-copy-stripe="${escapeHtml(invoice.paymentUrl)}">Copy payment link</button><button class="text-button" data-stripe-sync>Check payment status</button></div></div>`
             : data.stripe?.enabled
               ? `<div class="stripe-box preferred"><div><b>Preferred: pay securely with Stripe</b><span>${data.stripe.mode === "test" ? "TEST MODE - no real charge" : "Creates a secure link for the exact balance"}</span></div><button class="primary" data-stripe-create="${invoice.id}">Create Stripe payment link</button></div>`
               : `<div class="stripe-box"><div><b>Stripe is not connected</b><span>Configure it once, then create exact payment links here.</span></div><button class="secondary" data-stripe-settings>Stripe setup</button></div>`

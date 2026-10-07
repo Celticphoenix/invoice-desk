@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.1 — 2026-10-07
+
+- Replace emailed temporary Stripe checkouts with persistent, unguessable invoice payment links.
+- Renew expired checkout sessions on demand without reissuing the invoice.
+- Recheck payment status and the exact remaining balance before opening checkout.
+- Block payments for paid, voided, and still-processing invoices; reuse sessions for concurrent clicks.
+- Keep the customer payment page separate from the password-protected internal app.
+- Preserve existing Stripe checkout URLs as historical records; previously sent expired URLs must be replaced with the new invoice link.
+- Add end-to-end coverage for expiration, restart, partial payments, duplicate clicks, and provider outages.
+
 ## 1.3.0 — 2026-10-07
 
 - Reconcile partial and full Stripe refunds when the dashboard loads.

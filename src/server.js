@@ -16,6 +16,8 @@ import {
   finishCampaign,
   gmailConnection,
   invoiceCsv,
+  invoiceForPaymentToken,
+  invoicePaymentUrl,
   issueInvoice,
   markEmailAccepted,
   markEmailFailed,
@@ -205,9 +207,10 @@ function verifiedStripeRefund(charge, eventId, eventType) {
   });
 }
 
-async function syncStripePayments() {
-  if (!stripeStatus().enabled) return;
-  for (const saved of stripeSessionsToSync()) {
+async function syncStripePayments(invoiceId = "") {
+  const processing = new Set();
+  if (!stripeStatus().enabled) return processing;
+  for (const saved of stripeSessionsToSync(invoiceId)) {
     const session = await retrieveCheckoutSession(saved.id, {
       expandPayment: true,
     });
@@ -226,6 +229,8 @@ async function syncStripePayments() {
       );
     else if (session.status === "expired")
       updateStripeSessionStatus(session.id, "expired");
+    else if (session.status === "complete")
+      processing.add(saved.invoiceId);
     const paymentIntent =
       typeof session.payment_intent === "object" ? session.payment_intent : null;
     const charge =
@@ -239,6 +244,7 @@ async function syncStripePayments() {
         "charge.refund_synced",
       );
   }
+  return processing;
 }
 
 const stripeCreations = new Map();
@@ -246,9 +252,23 @@ const stripeCreations = new Map();
 async function createStripePayment(invoiceId) {
   if (stripeCreations.has(invoiceId)) return stripeCreations.get(invoiceId);
   const pending = (async () => {
-    const existing = reusableStripeSession(invoiceId);
-    if (existing) return existing;
+    const processing = await syncStripePayments(invoiceId);
+    if (processing.has(invoiceId))
+      throw Object.assign(new Error("Payment is processing. Please do not pay again."), { status: 409 });
     const invoice = payableInvoice(invoiceId);
+    if (invoice.state !== "issued" || invoice.balanceMinor < 1)
+      throw Object.assign(new Error("This invoice has no payable balance"), { status: 409 });
+    // Retire old checkouts after a payment elsewhere changed the balance.
+    for (const saved of stripeSessionsToSync(invoiceId).filter((item) => item.status === "open")) {
+      if (saved.amountMinor !== invoice.balanceMinor || saved.currency !== invoice.currency) {
+        const expired = await expireCheckoutSession(saved.id);
+        if (expired.status !== "expired")
+          throw Object.assign(new Error("Could not retire the previous checkout. Please try again."), { status: 503 });
+        updateStripeSessionStatus(saved.id, "expired");
+      }
+    }
+    const existing = reusableStripeSession(invoiceId);
+    if (existing) return { ...existing, paymentUrl: invoicePaymentUrl(invoiceId) };
     const session = await createCheckoutSession(invoice);
     if (
       session.client_reference_id !== invoice.id ||
@@ -259,7 +279,8 @@ async function createStripePayment(invoiceId) {
         new Error("Stripe checkout did not match the invoice"),
         { status: 502 },
       );
-    return saveStripeSession(invoice.id, session).stripeCheckout;
+    return { ...saveStripeSession(invoice.id, session).stripeCheckout,
+      paymentUrl: invoicePaymentUrl(invoiceId) };
   })();
   stripeCreations.set(invoiceId, pending);
   try {
@@ -310,8 +331,6 @@ async function reviewAndSend(invoiceId) {
     throw Object.assign(new Error("Only an active invoice can be emailed"), {
       status: 409,
     });
-  if (invoice.balanceMinor > 0 && stripeStatus().enabled)
-    await createStripePayment(invoice.id);
   const connection = gmailConnection();
   const state = gmailStatus(connection);
   const outbox = queueInvoiceEmail(
@@ -375,6 +394,69 @@ const staticFiles = {
   "/public-info.css": ["public-info.css", "text/css; charset=utf-8"],
 };
 
+function htmlEscape(value) {
+  return String(value).replace(/[&<>"']/g, (character) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
+}
+
+function paymentPage(response, status, title, message, invoice = null, paymentPath = "") {
+  const amount = invoice ? new Intl.NumberFormat("en-CA", {
+    style: "currency", currency: invoice.currency,
+  }).format(invoice.balanceMinor / 100) : "";
+  response.writeHead(status, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "private, no-store",
+    "X-Robots-Tag": "noindex, nofollow, noarchive",
+    ...securityHeaders,
+  });
+  response.end(`<!doctype html><html lang="en"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>${htmlEscape(title)} — Invoice Desk</title><link rel="stylesheet" href="/public-info.css"></head>
+    <body><main class="public-shell"><section class="public-card">
+    <p class="eyebrow">Secure invoice payment</p><h1>${htmlEscape(title)}</h1>
+    ${invoice ? `<p>${htmlEscape(invoice.invoiceNumber)} · ${htmlEscape(invoice.currency)} ${htmlEscape(amount)} remaining</p>` : ""}
+    <p>${htmlEscape(message)}</p>
+    ${paymentPath ? `<form method="post" action="${htmlEscape(paymentPath)}"><button class="payment-button" type="submit">Continue to secure payment</button></form>
+      <p>You will enter your payment details on Stripe. Opening this page does not charge your card.</p>` : ""}
+    </section></main></body></html>`);
+}
+
+async function customerPayment(request, response, url, token) {
+  let invoice;
+  try { invoice = invoiceForPaymentToken(token); } catch {
+    return paymentPage(response, 404, "Payment link not found", "Please ask the sender for the correct invoice payment link.");
+  }
+  if (invoice.state !== "issued")
+    return paymentPage(response, 410, "Invoice no longer payable", "This invoice has been voided. Please contact the sender.");
+  if (!stripeStatus().enabled)
+    return paymentPage(response, 503, "Payment temporarily unavailable", "Please contact the sender or try again later.");
+  if (request.method === "POST" && !sameOrigin(request))
+    return paymentPage(response, 403, "Payment request blocked", "Open the original invoice payment link and try again.");
+  try {
+    if (request.method === "GET") {
+      const processing = await syncStripePayments(invoice.id);
+      invoice = payableInvoice(invoice.id);
+      if (invoice.state !== "issued")
+        return paymentPage(response, 410, "Invoice no longer payable", "This invoice has been voided. Please contact the sender.");
+      if (invoice.balanceMinor < 1)
+        return paymentPage(response, 200, "Invoice already paid", "No further payment is needed.");
+      if (processing.has(invoice.id))
+        return paymentPage(response, 202, "Payment is processing", "Please do not pay again. Check this page later for confirmation.");
+      return paymentPage(response, 200, "Pay your invoice", "This invoice link stays usable even when a temporary Stripe checkout expires.", invoice, url.pathname);
+    }
+    const checkout = await createStripePayment(invoice.id);
+    response.writeHead(303, { Location: checkout.url, "Cache-Control": "no-store", ...securityHeaders });
+    return response.end();
+  } catch (error) {
+    invoice = payableInvoice(invoice.id);
+    if (invoice.balanceMinor < 1)
+      return paymentPage(response, 200, "Invoice already paid", "No further payment is needed.");
+    return paymentPage(response, error.status === 409 ? 409 : 503,
+      error.status === 409 ? "Payment needs attention" : "Payment temporarily unavailable",
+      error.status === 409 ? "Payment may already be processing. Please contact the sender before paying again." : "We could not check the current payment status. Please try again later or contact the sender.");
+  }
+}
+
 const server = createServer(async (request, response) => {
   const url = new URL(
     request.url ?? "/",
@@ -383,6 +465,9 @@ const server = createServer(async (request, response) => {
   try {
     if (request.method === "GET" && url.pathname === "/api/health")
       return json(response, 200, { ok: true });
+    const paymentMatch = url.pathname.match(/^\/pay\/([^/]+)$/);
+    if (paymentMatch && ["GET", "POST"].includes(request.method))
+      return await customerPayment(request, response, url, paymentMatch[1]);
     if (request.method === "GET" && staticFiles[url.pathname]) {
       const [filename, type] = staticFiles[url.pathname];
       const contents = readFileSync(path.resolve("public", filename));
@@ -496,8 +581,12 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         stripeError = error.message;
       }
+      const records = dashboard();
       return json(response, 200, {
-        ...dashboard(),
+        ...records,
+        invoices: records.invoices.map((invoice) => ({ ...invoice,
+          paymentUrl: stripeStatus().enabled && invoice.state === "issued" && invoice.balanceMinor > 0
+            ? invoicePaymentUrl(invoice.id) : "" })),
         stripe: { ...stripeStatus(), error: stripeError },
         email: gmailStatus(gmailConnection()),
       });
