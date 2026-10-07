@@ -91,7 +91,10 @@ function migrate(db) {
       amount_minor INTEGER NOT NULL CHECK(amount_minor > 0),
       currency TEXT NOT NULL CHECK(currency IN ('CAD','USD')), url TEXT NOT NULL,
       status TEXT NOT NULL CHECK(status IN ('open','paid','expired')),
-      livemode INTEGER NOT NULL CHECK(livemode IN (0,1)), created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      livemode INTEGER NOT NULL CHECK(livemode IN (0,1)),
+      payment_intent_id TEXT NOT NULL DEFAULT '',
+      refunded_minor INTEGER NOT NULL DEFAULT 0 CHECK(refunded_minor >= 0),
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS stripe_events(
       id TEXT PRIMARY KEY, event_type TEXT NOT NULL, processed_at TEXT NOT NULL
@@ -337,6 +340,25 @@ function migrate(db) {
     ).run();
     db.prepare("INSERT INTO schema_migrations VALUES (8, ?)").run(now());
   }
+  if (
+    !db.prepare("SELECT version FROM schema_migrations WHERE version=9").get()
+  ) {
+    const stripeColumns = new Set(
+      db.prepare("PRAGMA table_info(stripe_sessions)").all().map((row) => row.name),
+    );
+    if (!stripeColumns.has("payment_intent_id"))
+      db.exec(
+        "ALTER TABLE stripe_sessions ADD COLUMN payment_intent_id TEXT NOT NULL DEFAULT ''",
+      );
+    if (!stripeColumns.has("refunded_minor"))
+      db.exec(
+        "ALTER TABLE stripe_sessions ADD COLUMN refunded_minor INTEGER NOT NULL DEFAULT 0 CHECK(refunded_minor >= 0)",
+      );
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS stripe_payment_intent_idx ON stripe_sessions(payment_intent_id)",
+    );
+    db.prepare("INSERT INTO schema_migrations VALUES (9, ?)").run(now());
+  }
 }
 
 function problem(status, message) {
@@ -572,7 +594,7 @@ function invoiceView(row, db = database()) {
   const balance = Math.max(0, total - paid);
   const stripe = db
     .prepare(
-      "SELECT id,amount_minor,currency,url,status,livemode FROM stripe_sessions WHERE invoice_id=? ORDER BY created_at DESC LIMIT 1",
+      "SELECT id,amount_minor,currency,url,status,livemode,payment_intent_id,refunded_minor FROM stripe_sessions WHERE invoice_id=? ORDER BY created_at DESC LIMIT 1",
     )
     .get(row.id);
   return {
@@ -611,6 +633,8 @@ function invoiceView(row, db = database()) {
           url: stripe.url,
           status: stripe.status,
           livemode: Boolean(stripe.livemode),
+          paymentIntentId: stripe.payment_intent_id,
+          refundedMinor: Number(stripe.refunded_minor),
         }
       : null,
   };
@@ -1489,7 +1513,9 @@ export function saveStripeSession(invoiceId, stripeSession) {
   if (!value.url.startsWith("https://"))
     throw problem(409, "Stripe did not return a secure payment URL");
   const timestamp = now();
-  db.prepare("INSERT INTO stripe_sessions VALUES (?,?,?,?,?,'open',?,?,?)").run(
+  db.prepare(
+    "INSERT INTO stripe_sessions(id,invoice_id,amount_minor,currency,url,status,livemode,payment_intent_id,refunded_minor,created_at,updated_at) VALUES (?,?,?,?,?,'open',?,'',0,?,?)",
+  ).run(
     value.id,
     invoice.id,
     value.amountMinor,
@@ -1511,10 +1537,10 @@ export function saveStripeSession(invoiceId, stripeSession) {
 export function stripeSessionsToSync() {
   return database()
     .prepare(
-      "SELECT id,invoice_id FROM stripe_sessions WHERE status='open' ORDER BY created_at",
+      "SELECT id,invoice_id,status FROM stripe_sessions WHERE status IN ('open','paid') ORDER BY created_at",
     )
     .all()
-    .map((row) => ({ id: row.id, invoiceId: row.invoice_id }));
+    .map((row) => ({ id: row.id, invoiceId: row.invoice_id, status: row.status }));
 }
 
 export function updateStripeSessionStatus(sessionId, status) {
@@ -1529,6 +1555,11 @@ export function recordStripePayment(input) {
   const db = database();
   const eventId = text(input.eventId, "Stripe event", 255, true);
   const sessionId = text(input.sessionId, "Stripe session", 255, true);
+  const paymentIntentId = text(
+    input.paymentIntentId ?? "",
+    "Stripe payment intent",
+    255,
+  );
   db.exec("BEGIN IMMEDIATE");
   try {
     const session = db
@@ -1538,6 +1569,10 @@ export function recordStripePayment(input) {
     if (input.invoiceId && input.invoiceId !== session.invoice_id)
       throw problem(409, "Stripe invoice reference does not match");
     const invoice = findInvoice(session.invoice_id, db);
+    if (paymentIntentId && !session.payment_intent_id)
+      db.prepare(
+        "UPDATE stripe_sessions SET payment_intent_id=?,updated_at=? WHERE id=?",
+      ).run(paymentIntentId, now(), session.id);
     if (db.prepare("SELECT id FROM stripe_events WHERE id=?").get(eventId)) {
       db.exec("COMMIT");
       return invoice;
@@ -1584,8 +1619,8 @@ export function recordStripePayment(input) {
       timestamp,
     );
     db.prepare(
-      "UPDATE stripe_sessions SET status='paid',updated_at=? WHERE id=?",
-    ).run(timestamp, session.id);
+      "UPDATE stripe_sessions SET status='paid',payment_intent_id=?,updated_at=? WHERE id=?",
+    ).run(paymentIntentId, timestamp, session.id);
     db.prepare("INSERT INTO stripe_events VALUES (?,?,?)").run(
       eventId,
       text(input.eventType ?? "sync", "Stripe event type", 100, true),
@@ -1599,6 +1634,105 @@ export function recordStripePayment(input) {
     });
     db.exec("COMMIT");
     return findInvoice(invoice.id, db);
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export function recordStripeRefund(input) {
+  const db = database();
+  const eventId = text(input.eventId, "Stripe event", 255, true);
+  const paymentIntentId = text(
+    input.paymentIntentId ?? "",
+    "Stripe payment intent",
+    255,
+  );
+  const invoiceId = text(input.invoiceId ?? "", "Invoice", 100);
+  const refundedMinor = integer(
+    input.refundedMinor,
+    "Stripe refunded amount",
+    0,
+    10_000_000_000,
+  );
+  const refundedCurrency = currency(String(input.currency ?? "").toUpperCase());
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (db.prepare("SELECT id FROM stripe_events WHERE id=?").get(eventId)) {
+      db.exec("COMMIT");
+      return null;
+    }
+    let session = paymentIntentId
+      ? db
+          .prepare(
+            "SELECT * FROM stripe_sessions WHERE payment_intent_id=? ORDER BY created_at DESC LIMIT 1",
+          )
+          .get(paymentIntentId)
+      : null;
+    if (!session && invoiceId)
+      session = db
+        .prepare(
+          "SELECT * FROM stripe_sessions WHERE invoice_id=? AND status='paid' ORDER BY created_at DESC LIMIT 1",
+        )
+        .get(invoiceId);
+    if (!session) throw problem(404, "Stripe payment for this refund was not found");
+    if (session.status !== "paid")
+      throw problem(409, "Only a paid Stripe session can be refunded");
+    if (invoiceId && invoiceId !== session.invoice_id)
+      throw problem(409, "Stripe refund invoice reference does not match");
+    if (refundedCurrency !== session.currency)
+      throw problem(409, "Stripe refund currency does not match the payment");
+    if (refundedMinor > Number(session.amount_minor))
+      throw problem(409, "Stripe refund is greater than the payment");
+    const alreadyRefunded = Number(session.refunded_minor ?? 0);
+    if (refundedMinor > alreadyRefunded) {
+      const active = db
+        .prepare(
+          "SELECT * FROM payments WHERE invoice_id=? AND method='stripe' AND reference=? AND status='active' ORDER BY created_at DESC LIMIT 1",
+        )
+        .get(session.invoice_id, session.id);
+      const expectedActive = Number(session.amount_minor) - alreadyRefunded;
+      if (!active || Number(active.amount_minor) !== expectedActive)
+        throw problem(
+          409,
+          "Stripe refund could not be reconciled with the recorded payment; review it manually",
+        );
+      const remainingMinor = Number(session.amount_minor) - refundedMinor;
+      const timestamp = now();
+      db.prepare("UPDATE payments SET status='corrected' WHERE id=?").run(active.id);
+      if (remainingMinor > 0)
+        db.prepare("INSERT INTO payments VALUES (?,?,?,?,?,?,?,?,?,?,?)").run(
+          randomUUID(),
+          active.invoice_id,
+          timestamp.slice(0, 10),
+          "stripe",
+          active.currency,
+          remainingMinor,
+          session.id,
+          `Stripe payment after ${(refundedMinor / 100).toFixed(2)} refunded`,
+          "active",
+          active.id,
+          timestamp,
+        );
+      db.prepare(
+        "UPDATE stripe_sessions SET payment_intent_id=?,refunded_minor=?,updated_at=? WHERE id=?",
+      ).run(paymentIntentId || session.payment_intent_id, refundedMinor, timestamp, session.id);
+      audit(db, "payment", active.id, "stripe_refund_recorded", {
+        invoiceId: session.invoice_id,
+        sessionId: session.id,
+        paymentIntentId: paymentIntentId || session.payment_intent_id,
+        refundedMinor,
+        remainingMinor,
+        currency: session.currency,
+      });
+    }
+    db.prepare("INSERT INTO stripe_events VALUES (?,?,?)").run(
+      eventId,
+      text(input.eventType ?? "charge.refunded", "Stripe event type", 100, true),
+      now(),
+    );
+    db.exec("COMMIT");
+    return findInvoice(session.invoice_id, db);
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;

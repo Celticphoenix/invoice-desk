@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0 — 2026-10-07
+
+- Reconcile partial and full Stripe refunds when the dashboard loads.
+- Accept duplicate-safe `charge.refunded` webhook events for immediate updates.
+- Preserve the original payment while recording the net payment after a refund.
+- Show Stripe refund amounts directly on affected invoices.
+- Expand automated coverage to include partial refund synchronization.
+
 ## 1.2.0 — 2026-09-14
 
 - Add selected-client email campaigns sent as individual Gmail messages.

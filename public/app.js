@@ -231,6 +231,10 @@ function invoiceCards(invoices) {
           ? `<form class="payment-form" data-payment="${invoice.id}"><b>Paid another way?</b><label>Amount<input name="amount" inputmode="decimal" placeholder="0.00" required /></label><label>How paid<select name="method"><option value="bank_transfer">Interac e-Transfer</option><option value="paypal">PayPal</option><option value="other">Other</option></select></label><label>Confirmation or reference<input name="reference" placeholder="Optional" /></label><button class="primary">Record payment</button></form>`
           : "";
       const checkout = invoice.stripeCheckout;
+      const refundNote =
+        Number(checkout?.refundedMinor ?? 0) > 0
+          ? `<p class="void-note">Stripe refund: ${money(checkout.refundedMinor, checkout.currency)}. The original payment remains in the audit history.</p>`
+          : "";
       const stripeControls =
         invoice.state === "issued" && invoice.balanceMinor > 0
           ? checkout?.status === "open"
@@ -242,7 +246,7 @@ function invoiceCards(invoices) {
       const emailStatus = emailRecord
         ? `<div class="email-box ${emailRecord.status}"><div><b>${emailRecord.status === "provider_accepted" ? "Gmail accepted this email" : emailRecord.status === "failed" ? "Email needs attention" : "Email preview ready"}</b><span>To ${escapeHtml(emailRecord.recipientEmail)}${emailRecord.acceptedAt ? ` · ${escapeHtml(emailRecord.acceptedAt.slice(0, 10))}` : ""}</span></div>${emailRecord.status === "failed" ? `<button class="primary" data-retry-email="${emailRecord.id}">Retry email</button>` : emailRecord.status === "preview" ? `<details><summary>Read preview</summary><pre>${escapeHtml(emailRecord.bodyText)}</pre></details>` : ""}</div>`
         : "";
-      return `<article class="invoice-card"><div class="invoice-main"><div><span class="badge ${kind}">${label}</span><h3>${escapeHtml(invoice.invoiceNumber ?? "Unnumbered draft")}</h3><p>${escapeHtml(invoice.clientName)} · Due ${escapeHtml(invoice.dueDate)}</p></div><div class="amount"><strong>${money(invoice.totalMinor, invoice.currency)}</strong><span>${invoice.state === "issued" ? `${money(invoice.balanceMinor, invoice.currency)} remaining` : invoice.currency}</span></div></div><div class="invoice-buttons">${draftActions}</div>${voidAction}${emailStatus}${stripeControls}${payment}${invoice.voidReason ? `<p class="void-note">Reason: ${escapeHtml(invoice.voidReason)}</p>` : ""}</article>`;
+      return `<article class="invoice-card"><div class="invoice-main"><div><span class="badge ${kind}">${label}</span><h3>${escapeHtml(invoice.invoiceNumber ?? "Unnumbered draft")}</h3><p>${escapeHtml(invoice.clientName)} · Due ${escapeHtml(invoice.dueDate)}</p></div><div class="amount"><strong>${money(invoice.totalMinor, invoice.currency)}</strong><span>${invoice.state === "issued" ? `${money(invoice.balanceMinor, invoice.currency)} remaining` : invoice.currency}</span></div></div><div class="invoice-buttons">${draftActions}</div>${voidAction}${emailStatus}${refundNote}${stripeControls}${payment}${invoice.voidReason ? `<p class="void-note">Reason: ${escapeHtml(invoice.voidReason)}</p>` : ""}</article>`;
     })
     .join("");
 }

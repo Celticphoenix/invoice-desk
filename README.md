@@ -18,7 +18,7 @@ Invoice Desk started as an internal tool for a small professional-management tea
 - Assigns invoice numbers only when a draft is finalized
 - Freezes finalized invoice data and saves the exact PDF
 - Duplicates an earlier invoice into a new editable draft
-- Tracks partial, final, Stripe, and corrected payments
+- Tracks partial, final, Stripe, corrected, and Stripe-refunded payments
 - Creates optional Stripe-hosted Checkout links for the exact unpaid balance
 - Sends invoices and PDF attachments through optional send-only Gmail authorization
 - Uses a persistent outbox, safe preview mode, retries, and duplicate-send protection
@@ -87,7 +87,11 @@ Start in Stripe test mode. On Windows, `Configure Stripe.cmd` stores Stripe valu
 
 Never paste Stripe secrets into a client record, invoice, payment instructions, issue, chat, or committed configuration file. Each self-hosted installation uses its owner's Stripe account.
 
-The signed webhook endpoint is `POST /api/stripe/webhook`. Keep all other application routes behind authentication.
+The signed webhook endpoint is `POST /api/stripe/webhook`. Subscribe it to
+`checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+`checkout.session.expired`, and `charge.refunded`. Keep all other application
+routes behind authentication. Paid Checkout Sessions are also reconciled when
+the dashboard loads, so refunds remain accurate even if a webhook is delayed.
 
 ## Gmail delivery
 

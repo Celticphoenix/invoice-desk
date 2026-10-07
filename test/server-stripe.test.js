@@ -17,6 +17,7 @@ async function freePort() {
 test("runs the complete exact-amount Stripe payment flow", async () => {
   const dataRoot = mkdtempSync(path.join(os.tmpdir(), "invoice-desk-server-"));
   let paid = false;
+  let refundedMinor = 0;
   let stripeSession;
   const stripe = createServer(async (request, response) => {
     let raw = "";
@@ -41,6 +42,20 @@ test("runs the complete exact-amount Stripe payment flow", async () => {
       ...stripeSession,
       payment_status: paid ? "paid" : "unpaid",
       status: paid ? "complete" : "open",
+      payment_intent: paid
+        ? {
+            id: "pi_test_server_flow",
+            latest_charge: {
+              id: "ch_test_server_flow",
+              payment_intent: "pi_test_server_flow",
+              amount_refunded: refundedMinor,
+              currency: "cad",
+              metadata: {
+                invoice_id: stripeSession?.client_reference_id ?? "",
+              },
+            },
+          }
+        : null,
     };
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify(result));
@@ -150,6 +165,16 @@ test("runs the complete exact-amount Stripe payment flow", async () => {
     assert.equal(paidDashboard.invoices[0].paymentStatus, "paid");
     assert.equal(paidDashboard.payments.length, 1);
     assert.equal((await dashboardResponse()).payments.length, 1);
+    refundedMinor = 2500;
+    const refundedDashboard = await dashboardResponse();
+    assert.equal(refundedDashboard.invoices[0].paymentStatus, "partially_paid");
+    assert.equal(refundedDashboard.invoices[0].balanceMinor, 2500);
+    assert.equal(refundedDashboard.invoices[0].stripeCheckout.refundedMinor, 2500);
+    assert.equal(
+      refundedDashboard.payments.filter((payment) => payment.status === "active")[0]
+        .amountMinor,
+      8998,
+    );
     const pdf = await fetch(`${origin}/api/pdf/${invoice.id}`, {
       headers: { Cookie: cookie },
     });

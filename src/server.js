@@ -25,6 +25,7 @@ import {
   readPdf,
   recordPayment,
   recordStripePayment,
+  recordStripeRefund,
   reusableStripeSession,
   queueInvoiceEmail,
   saveDraft,
@@ -183,13 +184,33 @@ function verifiedStripePayment(session, eventId, eventType) {
     invoiceId,
     amountMinor: Number(session.amount_total),
     currency: String(session.currency ?? "").toUpperCase(),
+    paymentIntentId:
+      typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : session.payment_intent?.id ?? "",
+  });
+}
+
+function verifiedStripeRefund(charge, eventId, eventType) {
+  return recordStripeRefund({
+    eventId,
+    eventType,
+    paymentIntentId:
+      typeof charge.payment_intent === "string"
+        ? charge.payment_intent
+        : charge.payment_intent?.id ?? "",
+    invoiceId: charge.metadata?.invoice_id ?? "",
+    refundedMinor: Number(charge.amount_refunded ?? 0),
+    currency: String(charge.currency ?? "").toUpperCase(),
   });
 }
 
 async function syncStripePayments() {
   if (!stripeStatus().enabled) return;
   for (const saved of stripeSessionsToSync()) {
-    const session = await retrieveCheckoutSession(saved.id);
+    const session = await retrieveCheckoutSession(saved.id, {
+      expandPayment: true,
+    });
     if (
       session.client_reference_id !== saved.invoiceId &&
       session.metadata?.invoice_id !== saved.invoiceId
@@ -205,6 +226,18 @@ async function syncStripePayments() {
       );
     else if (session.status === "expired")
       updateStripeSessionStatus(session.id, "expired");
+    const paymentIntent =
+      typeof session.payment_intent === "object" ? session.payment_intent : null;
+    const charge =
+      paymentIntent && typeof paymentIntent.latest_charge === "object"
+        ? paymentIntent.latest_charge
+        : null;
+    if (charge && Number(charge.amount_refunded ?? 0) > 0)
+      verifiedStripeRefund(
+        charge,
+        `sync:${charge.id}:refunded:${charge.amount_refunded}`,
+        "charge.refund_synced",
+      );
   }
 }
 
@@ -395,6 +428,8 @@ const server = createServer(async (request, response) => {
         verifiedStripePayment(event.data.object, event.id, event.type);
       else if (event.type === "checkout.session.expired")
         updateStripeSessionStatus(event.data.object.id, "expired");
+      else if (event.type === "charge.refunded")
+        verifiedStripeRefund(event.data.object, event.id, event.type);
       return json(response, 200, { received: true });
     }
     if (request.method === "POST" && url.pathname === "/api/logout") {

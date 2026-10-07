@@ -25,6 +25,7 @@ import {
   readPdf,
   recordPayment,
   recordStripePayment,
+  recordStripeRefund,
   saveDraft,
   saveCampaign,
   saveClient,
@@ -246,7 +247,7 @@ test("deletes drafts without allowing issued invoice history to be removed", () 
   assert.equal(original.replacedByInvoiceId, null);
 });
 
-test("records a verified Stripe Checkout payment exactly once", () => {
+test("records a verified Stripe Checkout payment and refund exactly once", () => {
   const invoice = issueInvoice(saveDraft(draft(clientId)).id);
   saveStripeSession(invoice.id, {
     id: "cs_test_invoice_desk",
@@ -261,11 +262,36 @@ test("records a verified Stripe Checkout payment exactly once", () => {
     sessionId: "cs_test_invoice_desk",
     amountMinor: invoice.balanceMinor,
     currency: invoice.currency,
+    paymentIntentId: "pi_test_invoice_desk",
   };
   assert.equal(recordStripePayment(payment).paymentStatus, "paid");
   assert.equal(recordStripePayment(payment).paymentStatus, "paid");
   assert.equal(dashboard().payments.length, 1);
   assert.equal(dashboard().payments[0].method, "stripe");
+  const refund = {
+    eventId: "evt_refund_invoice_desk",
+    eventType: "charge.refunded",
+    paymentIntentId: "pi_test_invoice_desk",
+    invoiceId: invoice.id,
+    refundedMinor: 2500,
+    currency: invoice.currency,
+  };
+  assert.equal(recordStripeRefund(refund).paymentsMinor, invoice.totalMinor - 2500);
+  assert.equal(recordStripeRefund(refund), null);
+  const afterRefund = dashboard().invoices.find((item) => item.id === invoice.id);
+  assert.equal(afterRefund.paymentStatus, "partially_paid");
+  assert.equal(afterRefund.balanceMinor, 2500);
+  assert.equal(afterRefund.stripeCheckout.refundedMinor, 2500);
+  const fullRefund = {
+    ...refund,
+    eventId: "evt_full_refund_invoice_desk",
+    refundedMinor: invoice.totalMinor,
+  };
+  assert.equal(recordStripeRefund(fullRefund).paymentStatus, "unpaid");
+  assert.equal(
+    dashboard().payments.filter((item) => item.status === "active").length,
+    0,
+  );
 });
 
 test("tracks partial, corrected and final payments without currency mixing", () => {

@@ -121,10 +121,14 @@ export async function createCheckoutSession(invoice) {
   });
 }
 
-export async function retrieveCheckoutSession(sessionId) {
-  return stripeRequest(
+export async function retrieveCheckoutSession(sessionId, options = {}) {
+  const path = new URL(
     `/v1/checkout/sessions/${encodeURIComponent(sessionId)}`,
+    defaultApiBase,
   );
+  if (options.expandPayment === true)
+    path.searchParams.append("expand[]", "payment_intent.latest_charge");
+  return stripeRequest(`${path.pathname}${path.search}`);
 }
 
 export async function expireCheckoutSession(sessionId) {
